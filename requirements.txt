@@ -1,0 +1,31 @@
+# Claude Code API Server - Dependencies
+
+# Web Framework
+fastapi==0.128.00
+uvicorn[standard]==0.40.0
+python-multipart==0.0.22
+
+# Validation and Settings
+pydantic==2.12.5
+pydantic-settings==2.12.0
+
+# Authentication
+argon2-cffi==25.1.0
+
+# Cryptography (RSA encryption for admin bootstrap token)
+cryptography==46.0.4
+
+# YAML parsing (for agent definition frontmatter)
+PyYAML==6.0.3
+
+# Logging
+structlog==25.5.0
+
+# Claude Agent SDK
+claude-agent-sdk==0.1.27
+
+# Rate limiting
+slowapi==0.1.9
+
+# Async file operations
+aiofiles==25.1.0
