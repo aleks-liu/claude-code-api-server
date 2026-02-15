@@ -1,7 +1,7 @@
 # Claude Code API Server
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
+[![Python 3.14](https://img.shields.io/badge/Python-3.14%2B-blue.svg)](https://www.python.org/)
 
 A service layer around the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview) that turns Claude Code into a network-accessible, multi-client service with auth, sandboxing, and job management out of the box.
 
@@ -81,7 +81,7 @@ The trade-off is horizontal scalability — this is designed for teams and organ
 - **ZIP Archive Upload** — upload codebases as ZIP files for processing
 - **Per-Client API Keys** — track usage and costs per integration (Argon2 hashed)
 - **Process-Level Sandbox** — bwrap namespace isolation; jobs cannot see each other's files
-- **Security** — path traversal protection, directory isolation, fail-closed defaults
+- **Security** — path traversal protection, directory isolation, fail-closed defaults, upstream proxy support for corporate environments
 - **Output File Collection** — new/modified files automatically detected and returned
 - **MCP Server Support** — extend Claude with external tools (npm, pip, HTTP/SSE)
 - **Custom Subagents** — define specialized task agents with tailored prompts and tools

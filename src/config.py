@@ -211,6 +211,36 @@ class Settings(BaseSettings):
             "the npm package via 'npm root -g' as a fallback."
         ),
     )
+    autoallowed_domains: str = Field(
+        default="api.anthropic.com,*.anthropic.com,claude.ai,*.claude.ai",
+        description=(
+            "Comma-separated list of domains that are always allowed "
+            "through the network proxy regardless of security profile. "
+            "These ensure Claude CLI can always reach Anthropic services."
+        ),
+    )
+    upstream_http_proxy: str = Field(
+        default="",
+        description=(
+            "Upstream HTTP proxy for plain HTTP connections from the "
+            "per-job network proxy. Format: http://[user:pass@]host:port "
+            "or https://[user:pass@]host:port. "
+            "When set, the SandboxProxy forwards allowed plain HTTP "
+            "requests through this proxy. Only affects network-isolated "
+            "profiles. The unconfined profile is not affected."
+        ),
+    )
+    upstream_https_proxy: str = Field(
+        default="",
+        description=(
+            "Upstream HTTP proxy for HTTPS (CONNECT) connections from the "
+            "per-job network proxy. Format: http://[user:pass@]host:port "
+            "or https://[user:pass@]host:port. "
+            "When set, the SandboxProxy tunnels allowed HTTPS connections "
+            "through this proxy via CONNECT. Only affects network-isolated "
+            "profiles. The unconfined profile is not affected."
+        ),
+    )
 
 
     # ==========================================================================
@@ -427,6 +457,17 @@ class Settings(BaseSettings):
     def cleanup_interval_seconds(self) -> int:
         """Cleanup interval in seconds."""
         return self.cleanup_interval_minutes * 60
+
+    # ==========================================================================
+    # Computed Properties - Network
+    # ==========================================================================
+
+    @property
+    def autoallowed_domains_list(self) -> list[str]:
+        """Auto-allowed domains parsed into a list."""
+        if not self.autoallowed_domains.strip():
+            return []
+        return [d.strip() for d in self.autoallowed_domains.split(",") if d.strip()]
 
 
 @lru_cache

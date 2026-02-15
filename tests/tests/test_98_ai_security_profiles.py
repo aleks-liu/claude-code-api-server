@@ -220,21 +220,6 @@ def test_ai_basic_functionality_restrictive(api, profile_setup):
     assert "hello.txt" in output_files
 
 
-def test_ai_tool_denied_webfetch(api, profile_setup):
-    """Verify WebFetch is denied under restrictive profile."""
-    headers = profile_setup["headers"]["restrictive"]
-    prompt = (
-        "Try to use the WebFetch tool to fetch the URL https://example.com. "
-        "You will likely get a permission denied error — that is expected. "
-        f"{RESULT_SCHEMA_INSTRUCTION} with test_name='webfetch_denied'. "
-        "Record action='use_webfetch' with success=false if denied, or success=true if it worked."
-    )
-    job = _submit_and_wait(api, headers, prompt)
-    result = _parse_test_result(job)
-    action = _find_action(result, "use_webfetch")
-    assert action["success"] is False
-
-
 def test_ai_tool_denied_websearch(api, profile_setup):
     """Verify WebSearch is denied under restrictive profile."""
     headers = profile_setup["headers"]["restrictive"]

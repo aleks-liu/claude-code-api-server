@@ -14,6 +14,7 @@
 - [Sandbox Isolation (bwrap)](#sandbox-isolation-bwrap)
   - [Filesystem Layout Inside the Sandbox](#filesystem-layout-inside-the-sandbox)
   - [Network Isolation](#network-isolation)
+  - [Upstream Proxy Support](#upstream-proxy-support)
   - [seccomp BPF Hardening](#seccomp-bpf-hardening)
   - [Fail-Closed Behavior](#fail-closed-behavior)
   - [How It Works](#how-it-works)
@@ -60,7 +61,7 @@ HOST PROCESS (Python API server)
 
 **Process-level bwrap sandbox** (`sandbox.py`): wraps the entire Claude CLI process in a bubblewrap namespace. Every child process — Bash commands, file operations, sub-agents — inherits the restricted filesystem and network namespace. This layer cannot be bypassed by the LLM. Custom subagents (see [Subagent Management](subagents.md)) are passed via the SDK's `agents` parameter and execute within this same sandbox — all their tool invocations are fully isolated.
 
-**Per-job network proxy** (`sandbox_proxy.py`): for profiles with network restrictions, a Python asyncio HTTP CONNECT proxy runs on a Unix socket in the job directory. The proxy evaluates each outbound connection against the profile's `NetworkPolicy` (domain allowlists, IP range denylists). Mandatory Anthropic API domains are always allowed regardless of profile. The proxy runs as coroutines in the API server's event loop — no separate process.
+**Per-job network proxy** (`sandbox_proxy.py`): for profiles with network restrictions, a Python asyncio HTTP CONNECT proxy runs on a Unix socket in the job directory. The proxy evaluates each outbound connection against the profile's `NetworkPolicy` (domain allowlists, IP range denylists). Auto-allowed domains (configurable via `CCAS_AUTOALLOWED_DOMAINS`) are always allowed regardless of profile. The proxy runs as coroutines in the API server's event loop — no separate process.
 
 ---
 
@@ -78,7 +79,7 @@ Three built-in profiles are created on first startup:
 |---------|------------------|-------------|---------|-------------|
 | `unconfined` | None | All | Unrestricted (no proxy, no `--unshare-net`) | No restrictions. For trusted clients or development. |
 | `common` (default) | None | All | Any internet domain; private IPs blocked | Balanced security. Proxy filters outbound connections; private networks (10.x, 172.16.x, 192.168.x, localhost) denied. |
-| `restrictive` | WebFetch, WebSearch denied | None (`[]`) | Anthropic API only | Maximum security. Only `*.anthropic.com` reachable. |
+| `restrictive` | WebFetch, WebSearch denied | None (`[]`) | Auto-allowed domains only | Maximum security. No domains in profile's `allowed_domains` — only auto-allowed domains (`CCAS_AUTOALLOWED_DOMAINS`) reachable via proxy bypass. |
 
 Built-in profiles cannot be deleted but can be modified by admins. Custom profiles can be created for specific use cases.
 
@@ -169,7 +170,7 @@ When a security profile has network restrictions (any profile other than `unconf
 
 **Filtering flow** (evaluated per outbound connection):
 
-1. Mandatory domains (`*.anthropic.com`) are always allowed — hardcoded, not configurable
+1. Auto-allowed domains (`*.anthropic.com`, `*.claude.ai` by default) are always allowed — configurable via `CCAS_AUTOALLOWED_DOMAINS`
 2. Raw IP destinations checked against `allow_ip_destination`
 3. `denied_domains` checked (overrides allowed)
 4. `allowed_domains` checked (null = any, empty = none)
@@ -184,6 +185,42 @@ When a security profile has network restrictions (any profile other than `unconf
 **Kill switch**: Set `CCAS_SANDBOX_NETWORK_ENABLED=false` to disable all network isolation (for debugging or environments where `--unshare-net` doesn't work). When disabled, jobs with network-restricted profiles log a warning but run without network filtering.
 
 **Dependencies**: Network isolation requires `socat` to be installed (included in the Docker image).
+
+### Upstream Proxy Support
+
+In corporate/enterprise environments where internet access requires a forward HTTP proxy, the per-job SandboxProxy can chain through an upstream proxy. This enables network-isolated security profiles (`common`, `restrictive`, custom) to work in proxy-mandatory environments.
+
+**Configuration:**
+
+| Variable | Description |
+|----------|-------------|
+| `CCAS_UPSTREAM_HTTP_PROXY` | Upstream proxy for plain HTTP traffic |
+| `CCAS_UPSTREAM_HTTPS_PROXY` | Upstream proxy for HTTPS CONNECT tunnels |
+
+Both support `http://` and `https://` schemes (the scheme controls TLS to the proxy itself, not to the destination). Basic authentication is supported via URL credentials (`http://user:pass@proxy:3128`).
+
+**How it works:**
+
+```
+Inside sandbox               Host process                    Corporate proxy
+┌──────────────┐     ┌────────────────────────┐     ┌─────────────────────┐
+│ Claude CLI    │     │                        │     │                     │
+│  → :3128 ─────────→ proxy.sock              │     │                     │
+│              │     │   → NetworkPolicy check │     │                     │
+│              │     │   → CONNECT via ────────────→ upstream proxy ──→ internet
+└──────────────┘     └────────────────────────┘     └─────────────────────┘
+```
+
+**Key properties:**
+
+- Policy evaluation (domain/IP checks) runs **before** connecting to the upstream proxy — denied requests never reach the proxy
+- When no upstream proxy is configured, behavior is identical to direct TCP (zero overhead)
+- The `unconfined` profile is not affected (it does not use SandboxProxy)
+- Proxy credentials are redacted in all log output
+- The two env vars are independently optional — only HTTP, only HTTPS, both, or neither can be configured
+- Invalid proxy URLs are logged at startup but do not prevent the server from starting (fail at job time with a clear error)
+
+**DNS optimization:** When no IP range rules exist in the profile (no `denied_ip_ranges`, no `allowed_ip_ranges`), DNS resolution is skipped entirely. This avoids DNS failures in proxy-mandatory environments where host-side DNS may not work, and is a performance improvement for all deployments.
 
 ### seccomp BPF Hardening
 
@@ -327,7 +364,7 @@ At its core, **Claude Code API Server** runs arbitrary tasks through Claude Code
 
 **What the sandbox covers and what it doesn't:**
 
-The bwrap sandbox isolates jobs from each other at the filesystem level — one job cannot access another job's data, and the host filesystem is read-only. Network access is controlled by the client's security profile: the `unconfined` profile allows unrestricted network access, while other profiles enforce domain and IP filtering through a per-job HTTP proxy with `--unshare-net` namespace isolation. The `common` profile (default) allows any public internet domain but blocks private networks. The `restrictive` profile only allows `*.anthropic.com`.
+The bwrap sandbox isolates jobs from each other at the filesystem level — one job cannot access another job's data, and the host filesystem is read-only. Network access is controlled by the client's security profile: the `unconfined` profile allows unrestricted network access, while other profiles enforce domain and IP filtering through a per-job HTTP proxy with `--unshare-net` namespace isolation. The `common` profile (default) allows any public internet domain but blocks private networks. The `restrictive` profile only allows auto-allowed domains (`*.anthropic.com`, `*.claude.ai` by default, configurable via `CCAS_AUTOALLOWED_DOMAINS`).
 
 **Why Claude Code's built-in safety guardrails are not enough:**
 

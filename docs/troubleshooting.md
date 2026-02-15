@@ -88,6 +88,35 @@ Fix: Ensure @anthropic-ai/sandbox-runtime is installed: npm list -g @anthropic-a
      Or set CCAS_SECCOMP_DIR to the correct path.
 ```
 
+### "Cannot connect to upstream proxy: Name or service not known"
+
+```
+Cause: The CCAS_UPSTREAM_HTTPS_PROXY hostname is not resolvable from inside the Docker container.
+       Common when using host.docker.internal on Linux Docker without extra_hosts configuration.
+Fix: Add extra_hosts to docker-compose.yml:
+       extra_hosts:
+         - "host.docker.internal:host-gateway"
+     Or use the host's IP address directly instead of host.docker.internal.
+```
+
+### "Cannot connect to upstream proxy: Connection refused"
+
+```
+Cause: The upstream proxy is not running or not reachable on the configured host:port.
+Fix: Verify the upstream proxy is running and listening on the correct port.
+     Check that CCAS_UPSTREAM_HTTPS_PROXY and/or CCAS_UPSTREAM_HTTP_PROXY are set correctly.
+     For Docker: ensure the proxy host is reachable from the container network.
+```
+
+### "Upstream proxy returned 407 Proxy Authentication Required"
+
+```
+Cause: The upstream proxy requires authentication but credentials are missing or incorrect.
+Fix: Include credentials in the proxy URL: http://user:pass@proxy:3128
+     Verify the username and password are correct.
+     Check proxy logs for more details on the authentication failure.
+```
+
 ### Rate limit errors from Anthropic
 
 ```

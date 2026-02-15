@@ -145,6 +145,9 @@ class ClaudeRunner:
         # Check bwrap availability at startup for visibility
         self._check_bwrap_status()
 
+        # Validate upstream proxy configuration at startup
+        self._check_upstream_proxy_config()
+
     def _check_sdk_available(self) -> bool:
         """Check if the Claude Agent SDK is installed."""
         try:
@@ -211,6 +214,33 @@ class ClaudeRunner:
                         "or CCAS_BWRAP_ALLOW_UNSANDBOXED_FALLBACK=true is set. "
                         "Install bubblewrap: apt-get install bubblewrap"
                     ),
+                )
+
+    def _check_upstream_proxy_config(self) -> None:
+        """Validate and log upstream proxy configuration at startup."""
+        from .sandbox_proxy import parse_upstream_proxy
+
+        for var_name, value in [
+            ("CCAS_UPSTREAM_HTTP_PROXY", self._settings.upstream_http_proxy),
+            ("CCAS_UPSTREAM_HTTPS_PROXY", self._settings.upstream_https_proxy),
+        ]:
+            if not value.strip():
+                continue
+            try:
+                config = parse_upstream_proxy(value)
+                if config is not None:
+                    logger.info(
+                        "upstream_proxy_configured",
+                        variable=var_name,
+                        proxy_url=config.raw_url,
+                        use_tls=config.use_tls,
+                        has_auth=config.auth_header is not None,
+                    )
+            except ValueError as exc:
+                logger.error(
+                    "upstream_proxy_invalid",
+                    variable=var_name,
+                    error=str(exc),
                 )
 
     def _resolve_client_profile(self, client_id: str) -> str | None:
@@ -375,13 +405,35 @@ class ClaudeRunner:
 
         if network_isolated:
             try:
-                from .sandbox_proxy import get_proxy_manager
+                from .sandbox_proxy import get_proxy_manager, parse_upstream_proxy
+
+                # Parse upstream proxy config (once per job — cheap)
+                upstream_http = None
+                upstream_https = None
+                try:
+                    upstream_http = parse_upstream_proxy(
+                        self._settings.upstream_http_proxy
+                    )
+                    upstream_https = parse_upstream_proxy(
+                        self._settings.upstream_https_proxy
+                    )
+                except ValueError as exc:
+                    logger.error(
+                        "upstream_proxy_config_invalid",
+                        job_id=job_id,
+                        error=str(exc),
+                    )
+                    raise ExecutionError(
+                        f"Invalid upstream proxy configuration: {exc}"
+                    ) from exc
 
                 proxy_manager = get_proxy_manager()
                 proxy = await proxy_manager.start_proxy(
                     job_id=job_id,
                     job_dir=job_dir,
                     policy=profile.network,
+                    upstream_http=upstream_http,
+                    upstream_https=upstream_https,
                 )
                 logger.info(
                     "network_isolation_active",

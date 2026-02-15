@@ -6,9 +6,9 @@
 # =============================================================================
 ARG PYTHON_VERSION=3.14
 ARG NODE_MAJOR=20
-ARG CLAUDE_CODE_VERSION=2.1.29
+ARG CLAUDE_CODE_VERSION=2.1.39
 ARG GOSU_VERSION=1.19
-ARG SANDBOX_RUNTIME_VERSION=0.0.34
+ARG SANDBOX_RUNTIME_VERSION=0.0.37
 
 # =============================================================================
 # Build stage

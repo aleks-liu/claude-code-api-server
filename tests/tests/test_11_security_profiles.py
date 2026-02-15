@@ -380,8 +380,7 @@ def test_builtin_restrictive_settings(api, admin_headers):
     assert resp.status_code == 200
     body = resp.json()
     assert body["is_builtin"] is True
-    assert "api.anthropic.com" in body["network"]["allowed_domains"]
-    assert "*.anthropic.com" in body["network"]["allowed_domains"]
+    assert body["network"]["allowed_domains"] == []
     assert "WebFetch" in body["denied_tools"]
     assert "WebSearch" in body["denied_tools"]
     assert body["allowed_mcp_servers"] == []

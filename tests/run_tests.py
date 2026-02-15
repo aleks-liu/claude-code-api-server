@@ -70,7 +70,9 @@ def discover_modules(skip_ai: bool, only_module: str | None) -> list[str]:
     modules = sorted(glob.glob(pattern))
 
     if skip_ai:
-        modules = [m for m in modules if "test_99" not in m and "test_98" not in m]
+        modules = [m for m in modules if not any(
+            tag in m for tag in ("test_96", "test_97", "test_98", "test_99")
+        )]
 
     if only_module:
         modules = [m for m in modules if only_module in Path(m).stem]

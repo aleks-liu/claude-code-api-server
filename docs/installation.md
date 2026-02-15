@@ -27,6 +27,8 @@ docker run -d \
 docker-compose up -d
 ```
 
+**Corporate proxy environments:** If outbound internet access requires a forward proxy, set `CCAS_UPSTREAM_HTTPS_PROXY` (and optionally `CCAS_UPSTREAM_HTTP_PROXY`). See [Security — Upstream Proxy Support](security-model.md#upstream-proxy-support) for details.
+
 ---
 
 ## Option B: Local Python

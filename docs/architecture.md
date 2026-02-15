@@ -208,7 +208,7 @@ claude_code_api_server/
 | Feature | Description |
 |---------|-------------|
 | **Process-Level Sandbox (bwrap)** | Entire Claude CLI runs in an isolated filesystem namespace — user home, other jobs, and system paths are hidden or read-only |
-| **Network Isolation** | Per-job HTTP proxy with domain/IP filtering + bwrap `--unshare-net` network namespace isolation |
+| **Network Isolation** | Per-job HTTP proxy with domain/IP filtering + bwrap `--unshare-net` network namespace isolation. Supports upstream proxy chaining for corporate/enterprise environments |
 | **seccomp BPF Hardening** | Blocks direct socket creation inside sandbox, preventing proxy bypass (from `@anthropic-ai/sandbox-runtime`) |
 | **Security Profiles** | Configurable per-client profiles controlling network access, tool availability, and MCP server scoping |
 | **API Key Authentication** | Server-side keys hashed with Argon2 |

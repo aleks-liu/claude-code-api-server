@@ -27,6 +27,18 @@ Logs are written to stdout in structured format:
 {"timestamp":"2025-01-25T10:30:00Z","level":"info","event":"job_created","job_id":"job_abc123","client_id":"scanner"}
 ```
 
+**Key log events to monitor:**
+
+| Event | Level | Description |
+|-------|-------|-------------|
+| `job_created` | info | New job submitted |
+| `job_completed` | info | Job finished successfully |
+| `proxy_connection_denied` | warning | Network proxy blocked a connection (policy violation) |
+| `proxy_connection_error` | warning | Network proxy failed to connect to destination |
+| `proxy_upstream_unreachable` | warning | Cannot reach the configured upstream proxy |
+| `tool_denied_by_profile` | warning | Security profile blocked a tool call |
+| `process_sandbox_failed` | error | bwrap sandbox creation failed |
+
 ---
 
 ## Health Monitoring

@@ -24,11 +24,16 @@ Protocol support:
 """
 
 import asyncio
+import base64
 import ipaddress
 import re
 import socket
+import ssl
+import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 
+from .config import get_settings
 from .logging_config import get_logger
 from .models import NetworkPolicy
 
@@ -38,13 +43,6 @@ logger = get_logger(__name__)
 # =============================================================================
 # Constants
 # =============================================================================
-
-# Mandatory domains always allowed regardless of profile configuration.
-# Ensures Claude CLI can always communicate with the Anthropic API.
-_MANDATORY_ALLOWED_DOMAINS = [
-    "api.anthropic.com",
-    "*.anthropic.com",
-]
 
 # Buffer size for bidirectional relay
 _RELAY_BUFFER_SIZE = 65536
@@ -57,6 +55,238 @@ _UPSTREAM_CONNECT_TIMEOUT = 30.0
 
 # Proxy socket file name within job directory
 PROXY_SOCKET_NAME = "proxy.sock"
+
+
+# =============================================================================
+# Upstream Proxy Configuration
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class UpstreamProxyConfig:
+    """Parsed upstream proxy configuration."""
+
+    host: str
+    port: int
+    use_tls: bool  # True if proxy URL scheme is https://
+    auth_header: str | None  # Pre-encoded "Basic <b64>" value, or None
+    raw_url: str  # Original URL (for logging — password redacted)
+
+
+def _redact_proxy_url(url: str) -> str:
+    """Redact password in a proxy URL for safe logging."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.password:
+        # Replace password with ***
+        replaced = parsed._replace(
+            netloc=parsed.netloc.replace(
+                f":{parsed.password}@", ":***@", 1
+            )
+        )
+        return urllib.parse.urlunparse(replaced)
+    return url
+
+
+def parse_upstream_proxy(url: str) -> UpstreamProxyConfig | None:
+    """
+    Parse an upstream proxy URL into an UpstreamProxyConfig.
+
+    Args:
+        url: Proxy URL (http://[user:pass@]host:port or https://...).
+             Empty/whitespace returns None.
+
+    Returns:
+        UpstreamProxyConfig or None if URL is empty.
+
+    Raises:
+        ValueError: If URL has invalid scheme or is malformed.
+    """
+    if not url or not url.strip():
+        return None
+
+    url = url.strip()
+    parsed = urllib.parse.urlparse(url)
+
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"Unsupported proxy URL scheme '{parsed.scheme}'. "
+            f"Only 'http' and 'https' are supported."
+        )
+
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"Proxy URL has no hostname: {_redact_proxy_url(url)}")
+
+    port = parsed.port or 3128
+    use_tls = parsed.scheme == "https"
+
+    # Pre-encode Basic auth header if credentials present
+    auth_header: str | None = None
+    if parsed.username:
+        username = urllib.parse.unquote(parsed.username)
+        password = urllib.parse.unquote(parsed.password or "")
+        # Validate no CR/LF in credentials (header injection prevention)
+        if "\r" in username or "\n" in username or "\r" in password or "\n" in password:
+            raise ValueError("Proxy credentials contain invalid characters (CR/LF)")
+        credentials = f"{username}:{password}"
+        encoded = base64.b64encode(credentials.encode("utf-8")).decode("ascii")
+        auth_header = f"Basic {encoded}"
+
+    return UpstreamProxyConfig(
+        host=host,
+        port=port,
+        use_tls=use_tls,
+        auth_header=auth_header,
+        raw_url=_redact_proxy_url(url),
+    )
+
+
+# =============================================================================
+# Upstream Proxy Connection
+# =============================================================================
+
+
+async def _connect_via_upstream_proxy(
+    target_host: str,
+    target_port: int,
+    upstream: UpstreamProxyConfig,
+    job_id: str,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """
+    Establish a CONNECT tunnel through an upstream proxy.
+
+    Connects to the upstream proxy (optionally via TLS), sends an HTTP
+    CONNECT request, and returns the tunneled reader/writer pair.
+
+    Args:
+        target_host: Destination hostname.
+        target_port: Destination port.
+        upstream: Parsed upstream proxy configuration.
+        job_id: Job ID for logging.
+
+    Returns:
+        Tuple of (reader, writer) — now tunneled to the target.
+
+    Raises:
+        ConnectionError: If the upstream proxy is unreachable, rejects
+            the CONNECT, or returns an error.
+    """
+    logger.debug(
+        "proxy_upstream_connect",
+        job_id=job_id,
+        target=f"{target_host}:{target_port}",
+        upstream_proxy=upstream.raw_url,
+    )
+
+    # Step 1: Connect to upstream proxy
+    try:
+        connect_kwargs: dict = {
+            "host": upstream.host,
+            "port": upstream.port,
+        }
+        if upstream.use_tls:
+            connect_kwargs["ssl"] = ssl.create_default_context()
+
+        proxy_reader, proxy_writer = await asyncio.open_connection(**connect_kwargs)
+    except ssl.SSLError as exc:
+        logger.warning(
+            "proxy_upstream_tls_error",
+            job_id=job_id,
+            upstream_proxy=upstream.raw_url,
+            error=str(exc),
+        )
+        raise ConnectionError(
+            f"TLS handshake with upstream proxy {upstream.raw_url} failed: {exc}"
+        ) from exc
+    except (OSError, ConnectionError) as exc:
+        logger.warning(
+            "proxy_upstream_unreachable",
+            job_id=job_id,
+            upstream_proxy=upstream.raw_url,
+            error=str(exc),
+        )
+        raise ConnectionError(
+            f"Cannot connect to upstream proxy {upstream.raw_url}: {exc}"
+        ) from exc
+
+    # Step 2: Send CONNECT request
+    try:
+        connect_request = (
+            f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
+            f"Host: {target_host}:{target_port}\r\n"
+        )
+        if upstream.auth_header:
+            connect_request += f"Proxy-Authorization: {upstream.auth_header}\r\n"
+        connect_request += "\r\n"
+
+        proxy_writer.write(connect_request.encode("ascii"))
+        await proxy_writer.drain()
+
+        # Step 3: Read response (status line + headers until \r\n\r\n)
+        response_data = await asyncio.wait_for(
+            proxy_reader.readuntil(b"\r\n\r\n"),
+            timeout=_UPSTREAM_CONNECT_TIMEOUT,
+        )
+
+        # Parse status line
+        status_line = response_data.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+        parts = status_line.split(" ", 2)
+        if len(parts) < 2:
+            raise ConnectionError(
+                f"Upstream proxy returned malformed response: {status_line}"
+            )
+        status_code = int(parts[1])
+
+        # Step 4: Validate status
+        if status_code == 200:
+            logger.debug(
+                "proxy_upstream_connect_ok",
+                job_id=job_id,
+                target=f"{target_host}:{target_port}",
+            )
+            return proxy_reader, proxy_writer
+
+        # Error handling
+        if status_code == 407:
+            logger.warning(
+                "proxy_upstream_auth_failed",
+                job_id=job_id,
+                upstream_proxy=upstream.raw_url,
+                target=f"{target_host}:{target_port}",
+            )
+            raise ConnectionError(
+                f"Upstream proxy authentication failed (407) for "
+                f"{target_host}:{target_port} via {upstream.raw_url}"
+            )
+
+        logger.warning(
+            "proxy_upstream_connect_rejected",
+            job_id=job_id,
+            upstream_proxy=upstream.raw_url,
+            target=f"{target_host}:{target_port}",
+            status_code=status_code,
+            status_line=status_line,
+        )
+        raise ConnectionError(
+            f"Upstream proxy rejected CONNECT to {target_host}:{target_port} "
+            f"with status {status_code}: {status_line}"
+        )
+
+    except (ConnectionError, asyncio.TimeoutError):
+        # Close the proxy connection on error, then re-raise
+        try:
+            proxy_writer.close()
+            await proxy_writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
+        raise
+    except Exception:
+        try:
+            proxy_writer.close()
+            await proxy_writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
+        raise
 
 
 # =============================================================================
@@ -115,9 +345,9 @@ def _is_ip_address(host: str) -> bool:
         return False
 
 
-def _is_mandatory_domain(hostname: str) -> bool:
-    """Check if hostname is a mandatory always-allowed domain."""
-    return _match_any_domain(hostname, _MANDATORY_ALLOWED_DOMAINS)
+def _is_autoallowed_domain(hostname: str) -> bool:
+    """Check if hostname is an auto-allowed domain (configured via CCAS_AUTOALLOWED_DOMAINS)."""
+    return _match_any_domain(hostname, get_settings().autoallowed_domains_list)
 
 
 # =============================================================================
@@ -134,7 +364,7 @@ async def evaluate_policy(
     Evaluate a NetworkPolicy for a given destination hostname.
 
     Implements the filtering flow from the spec (Section 3.2.2):
-    1. Check mandatory Anthropic domains (always allowed)
+    1. Check auto-allowed domains (always allowed, see CCAS_AUTOALLOWED_DOMAINS)
     2. Check raw IP destination
     3. Check denied_domains
     4. Check allowed_domains
@@ -145,9 +375,9 @@ async def evaluate_policy(
     Returns:
         Tuple of (allowed: bool, reason: str)
     """
-    # Step 0: Mandatory domains bypass all checks
-    if not _is_ip_address(hostname) and _is_mandatory_domain(hostname):
-        return True, "Mandatory domain (Anthropic API)"
+    # Step 0: Auto-allowed domains bypass all checks
+    if not _is_ip_address(hostname) and _is_autoallowed_domain(hostname):
+        return True, "Auto-allowed domain"
 
     # Step 1: Raw IP check
     if _is_ip_address(hostname):
@@ -166,6 +396,13 @@ async def evaluate_policy(
                 return False, "No domains allowed (allowed_domains is empty)"
             if not _match_any_domain(hostname, policy.allowed_domains):
                 return False, f"Domain '{hostname}' not in allowed_domains"
+
+        # Optimization: skip DNS resolution when no IP range rules exist.
+        # This avoids DNS failures in proxy-mandatory environments where
+        # host-side DNS may not work, and is a performance win everywhere.
+        _has_ip_rules = bool(policy.denied_ip_ranges) or policy.allowed_ip_ranges is not None
+        if not _has_ip_rules:
+            return True, "Allowed (domain checks passed, no IP rules)"
 
         # Step 4: Resolve DNS to get IP for range checks
         try:
@@ -265,10 +502,14 @@ class SandboxProxy:
         job_id: str,
         socket_path: Path,
         policy: NetworkPolicy,
+        upstream_http: UpstreamProxyConfig | None = None,
+        upstream_https: UpstreamProxyConfig | None = None,
     ):
         self._job_id = job_id
         self._socket_path = socket_path
         self._policy = policy
+        self._upstream_http = upstream_http
+        self._upstream_https = upstream_https
         self._server: asyncio.AbstractServer | None = None
         self._active_connections: int = 0
 
@@ -401,12 +642,20 @@ class SandboxProxy:
             )
             return
 
-        # Connect upstream
+        # Connect upstream (via upstream proxy or direct)
         try:
-            upstream_reader, upstream_writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
-                timeout=_UPSTREAM_CONNECT_TIMEOUT,
-            )
+            if self._upstream_https is not None:
+                upstream_reader, upstream_writer = await asyncio.wait_for(
+                    _connect_via_upstream_proxy(
+                        host, port, self._upstream_https, self._job_id,
+                    ),
+                    timeout=_UPSTREAM_CONNECT_TIMEOUT,
+                )
+            else:
+                upstream_reader, upstream_writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=_UPSTREAM_CONNECT_TIMEOUT,
+                )
         except Exception as exc:
             logger.warning(
                 "proxy_connection_error",
@@ -469,47 +718,89 @@ class SandboxProxy:
             )
             return
 
-        # Connect upstream
-        try:
-            upstream_reader, upstream_writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port),
-                timeout=_UPSTREAM_CONNECT_TIMEOUT,
-            )
-        except Exception as exc:
-            logger.warning(
-                "proxy_connection_error",
+        # Connect upstream (via upstream proxy or direct)
+        if self._upstream_http is not None:
+            # Connect to upstream proxy instead of target
+            try:
+                connect_kwargs: dict = {
+                    "host": self._upstream_http.host,
+                    "port": self._upstream_http.port,
+                }
+                if self._upstream_http.use_tls:
+                    connect_kwargs["ssl"] = ssl.create_default_context()
+
+                upstream_reader, upstream_writer = await asyncio.wait_for(
+                    asyncio.open_connection(**connect_kwargs),
+                    timeout=_UPSTREAM_CONNECT_TIMEOUT,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "proxy_connection_error",
+                    job_id=self._job_id,
+                    destination=f"{host}:{port}",
+                    error=str(exc),
+                )
+                await _send_response(
+                    writer, 502, "Bad Gateway",
+                    f"Upstream connection failed: {exc}",
+                )
+                return
+
+            logger.debug(
+                "proxy_connection_allowed",
                 job_id=self._job_id,
                 destination=f"{host}:{port}",
-                error=str(exc),
+                reason=reason,
             )
-            await _send_response(
-                writer, 502, "Bad Gateway",
-                f"Upstream connection failed: {exc}",
-            )
-            return
 
-        logger.debug(
-            "proxy_connection_allowed",
-            job_id=self._job_id,
-            destination=f"{host}:{port}",
-            reason=reason,
-        )
+            # Inject Proxy-Authorization header if needed, keep absolute URL
+            if self._upstream_http.auth_header:
+                auth_line = f"Proxy-Authorization: {self._upstream_http.auth_header}\r\n".encode()
+                # Insert auth header before the final \r\n\r\n
+                header_data = header_data[:-2] + auth_line + b"\r\n"
 
-        # Forward the original request data (rewrite absolute URL to relative)
-        # Convert "GET http://host/path HTTP/1.1" to "GET /path HTTP/1.1"
-        http_match = _HTTP_REQUEST_RE.match(header_data)
-        if http_match:
-            method = http_match.group(1).decode()
-            path = http_match.group(4).decode() if http_match.group(4) else "/"
-            version = http_match.group(5).decode()
-            # Reconstruct first line with relative path
-            first_line = f"{method} {path} HTTP/{version}\r\n".encode()
-            # Find end of first line in original data
-            first_line_end = header_data.index(b"\r\n") + 2
-            rewritten = first_line + header_data[first_line_end:]
-            upstream_writer.write(rewritten)
-        else:
+            # Forward original request with absolute URL (no rewriting)
             upstream_writer.write(header_data)
+        else:
+            # Direct connection to target
+            try:
+                upstream_reader, upstream_writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port),
+                    timeout=_UPSTREAM_CONNECT_TIMEOUT,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "proxy_connection_error",
+                    job_id=self._job_id,
+                    destination=f"{host}:{port}",
+                    error=str(exc),
+                )
+                await _send_response(
+                    writer, 502, "Bad Gateway",
+                    f"Upstream connection failed: {exc}",
+                )
+                return
+
+            logger.debug(
+                "proxy_connection_allowed",
+                job_id=self._job_id,
+                destination=f"{host}:{port}",
+                reason=reason,
+            )
+
+            # Rewrite absolute URL to relative for direct connection
+            # Convert "GET http://host/path HTTP/1.1" to "GET /path HTTP/1.1"
+            http_match = _HTTP_REQUEST_RE.match(header_data)
+            if http_match:
+                method = http_match.group(1).decode()
+                path = http_match.group(4).decode() if http_match.group(4) else "/"
+                version = http_match.group(5).decode()
+                first_line = f"{method} {path} HTTP/{version}\r\n".encode()
+                first_line_end = header_data.index(b"\r\n") + 2
+                rewritten = first_line + header_data[first_line_end:]
+                upstream_writer.write(rewritten)
+            else:
+                upstream_writer.write(header_data)
 
         await upstream_writer.drain()
 
@@ -547,6 +838,8 @@ class ProxyManager:
         job_id: str,
         job_dir: Path,
         policy: NetworkPolicy,
+        upstream_http: UpstreamProxyConfig | None = None,
+        upstream_https: UpstreamProxyConfig | None = None,
     ) -> SandboxProxy:
         """
         Start a proxy for a job.
@@ -555,6 +848,8 @@ class ProxyManager:
             job_id: Job identifier.
             job_dir: Job directory (proxy.sock will be created here).
             policy: Network policy to enforce.
+            upstream_http: Upstream proxy for plain HTTP requests.
+            upstream_https: Upstream proxy for HTTPS CONNECT requests.
 
         Returns:
             The started SandboxProxy instance.
@@ -568,6 +863,8 @@ class ProxyManager:
             job_id=job_id,
             socket_path=socket_path,
             policy=policy,
+            upstream_http=upstream_http,
+            upstream_https=upstream_https,
         )
 
         try:

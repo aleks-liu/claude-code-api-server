@@ -117,12 +117,30 @@ def network_test_setup(api, admin_headers):
     """Create test clients with different profiles for network isolation tests."""
     clients = []
     client_headers_map = {}
+    custom_profiles = []
 
-    # Create clients for each built-in profile
+    # Create a custom profile that uses proxy but allows private IPs
+    private_allowed_profile = f"test-profile-private-allowed-{random_suffix()}"
+    resp = api.post("/v1/admin/security-profiles", headers=admin_headers, json={
+        "name": private_allowed_profile,
+        "description": "Test profile: proxy enabled, private IPs allowed",
+        "network": {
+            "allowed_domains": None,  # Any domain
+            "denied_domains": [],
+            "allowed_ip_ranges": None,  # Any IP range
+            "denied_ip_ranges": [],  # No denied ranges (private IPs allowed)
+            "allow_ip_destination": True,
+        },
+    })
+    assert resp.status_code == 201, f"Failed to create private-allowed profile: {resp.text}"
+    custom_profiles.append(private_allowed_profile)
+
+    # Create clients for each profile
     for label, profile in [
         ("restrictive", "restrictive"),
         ("unconfined", "unconfined"),
         ("common", "common"),
+        ("private_allowed", private_allowed_profile),
     ]:
         cid = f"test-client-net-{label}-{random_suffix()}"
         resp = api.post("/v1/admin/clients", headers=admin_headers, json={
@@ -144,6 +162,8 @@ def network_test_setup(api, admin_headers):
     # Teardown
     for cid in clients:
         api.delete(f"/v1/admin/clients/{cid}", headers=admin_headers)
+    for profile in custom_profiles:
+        api.delete(f"/v1/admin/security-profiles/{profile}", headers=admin_headers)
 
 
 # =============================================================================
@@ -201,6 +221,31 @@ def test_ai_unconfined_can_reach_external_domain(api, network_test_setup):
     )
 
 
+def test_ai_private_allowed_can_reach_private_ip(api, network_test_setup):
+    """
+    Custom profile with proxy but private IPs allowed: job should reach localhost.
+
+    This profile has network restrictions (proxy is active) but does NOT deny
+    private IP ranges, so curl to 127.0.0.1 should succeed through the proxy.
+    This verifies the proxy correctly allows the request based on policy.
+    """
+    headers = network_test_setup["headers"]["private_allowed"]
+    prompt = (
+        "Use the Bash tool to run: curl -sS --max-time 10 http://127.0.0.1:8000/v1/health 2>&1\n"
+        f"{RESULT_SCHEMA_INSTRUCTION} with test_name='private_allowed_private_ip'. "
+        "Record action='curl_private_ip'. "
+        "If curl succeeded and got a JSON response with 'status', set success=true. "
+        "If curl failed, set success=false and include the error message in detail."
+    )
+    job = _submit_and_wait(api, headers, prompt)
+    result = _parse_test_result(job)
+    action = _find_action(result, "curl_private_ip")
+    assert action["success"] is True, (
+        f"Private-allowed profile should allow private IP access through proxy. "
+        f"Detail: {action.get('detail')}"
+    )
+
+
 def test_ai_common_blocks_private_ip(api, network_test_setup):
     """
     Common profile: job should NOT be able to reach private IPs.
@@ -210,14 +255,14 @@ def test_ai_common_blocks_private_ip(api, network_test_setup):
     """
     headers = network_test_setup["headers"]["common"]
     prompt = (
-        "Use the Bash tool to run: curl -sS --max-time 10 http://127.0.0.1:12345/ 2>&1\n"
-        "The request will likely fail because private IPs are blocked. "
+        "Use the Bash tool to run: curl -sS --max-time 10 http://127.0.0.1:8000/v1/health 2>&1\n"
+        "The request will likely fail because private IPs are blocked by the proxy. "
         "That is expected.\n"
         f"{RESULT_SCHEMA_INSTRUCTION} with test_name='common_no_private_ip'. "
         "Record action='curl_private_ip'. "
-        "If curl succeeded and got a response, set success=true. "
-        "If curl failed (connection refused, proxy denied, timeout, etc.), set success=false "
-        "and include the error message in detail."
+        "If curl succeeded and got a response (e.g. JSON with 'status'), set success=true. "
+        "If curl failed (proxy denied, 403 Forbidden, connection refused, timeout, etc.), "
+        "set success=false and include the error message in detail."
     )
     job = _submit_and_wait(api, headers, prompt)
     result = _parse_test_result(job)

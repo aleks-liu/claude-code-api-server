@@ -276,7 +276,7 @@ def check_mcp_server(
             "capabilities": {},
             "clientInfo": {
                 "name": "claude-code-api-server-healthcheck",
-                "version": "0.1.0",
+                "version": "0.1.1",
             },
         },
     })

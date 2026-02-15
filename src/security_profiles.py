@@ -179,12 +179,13 @@ def _create_builtin_profiles() -> dict[str, SecurityProfile]:
         "restrictive": SecurityProfile(
             name="restrictive",
             description=(
-                "Maximum security. Only Anthropic API access. "
+                "Maximum security. Only auto-allowed domains reachable "
+                "(see CCAS_AUTOALLOWED_DOMAINS). "
                 "WebFetch and WebSearch denied. No MCP servers. "
                 "Private networks and raw IP destinations blocked."
             ),
             network=NetworkPolicy(
-                allowed_domains=["api.anthropic.com", "*.anthropic.com"],
+                allowed_domains=[],
                 denied_domains=[],
                 allowed_ip_ranges=None,
                 denied_ip_ranges=list(_PRIVATE_IP_RANGES),

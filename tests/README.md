@@ -30,7 +30,8 @@ docker exec cca-test python create_admin.py test-admin
 |----------|----------|-------------|
 | `TEST_ADMIN_API_KEY` | Yes | Admin API key |
 | `TEST_BASE_URL` | No | Server URL (default: `http://127.0.0.1:8080`) |
-| `ANTHROPIC_API_KEY` | No | Required only for AI integration test |
+| `ANTHROPIC_API_KEY` | No | Required for AI integration tests (test_96–test_99) |
+| `TEST_UPSTREAM_PROXY_PORT` | No | Port for the upstream proxy AI test (test_96). Server must be started with `CCAS_UPSTREAM_HTTPS_PROXY=http://host.docker.internal:<port>` |
 
 ```bash
 export TEST_ADMIN_API_KEY="cca_..."
@@ -84,11 +85,34 @@ PYTHONPATH=. pytest tests/tests/ -v
 | `test_09_security_isolation` | 16 | BOLA, role enforcement, deactivated clients |
 | `test_10_input_validation` | 15 | Injection, XSS, type confusion, oversized body |
 | `test_11_security_profiles` | 46 | Security profile CRUD, client-profile binding, built-in verification, validation |
-| `test_12_network_isolation` | 56 | Network proxy unit tests: domain/IP filtering, policy evaluation, CONNECT tunneling, wrapper generation |
+| `test_12_network_isolation` | 96 | Network proxy unit tests: domain/IP filtering, policy evaluation, CONNECT tunneling, upstream proxy chaining, wrapper generation |
 | `test_13_seccomp_hardening` | 44 | seccomp BPF detection, npm fallback discovery, inner script generation, runner wiring integration |
+| `test_96_ai_upstream_proxy` | 2 | AI tests: end-to-end upstream proxy chain verification (skipped without API key + `TEST_UPSTREAM_PROXY_PORT`) |
 | `test_97_ai_network_isolation` | 6 | AI tests: network isolation enforcement per profile (skipped without API key) |
-| `test_98_ai_security_profiles` | 9 | AI tests: tool denial, MCP filtering, selective policies (skipped without API key) |
+| `test_98_ai_security_profiles` | 8 | AI tests: tool denial, MCP filtering, selective policies (skipped without API key) |
 | `test_99_ai_integration` | 1 | Live Claude execution (skipped without API key) |
+
+## Upstream Proxy Tests (test_96)
+
+The upstream proxy AI test verifies the full proxy chain: Claude CLI → SandboxProxy → upstream proxy → internet. It requires special setup:
+
+1. **Start a test proxy port** (the test starts its own proxy automatically, you just pick the port):
+   ```bash
+   export TEST_UPSTREAM_PROXY_PORT=18128
+   ```
+
+2. **Configure the server** with `CCAS_UPSTREAM_HTTPS_PROXY=http://host.docker.internal:18128`.
+
+3. **Ensure `host.docker.internal` is resolvable** from Docker (`extra_hosts` in `docker-compose.yml`).
+
+4. **Run the test:**
+   ```bash
+   TEST_UPSTREAM_PROXY_PORT=18128 python tests/run_tests.py --module test_96_ai_upstream_proxy
+   ```
+
+Without `TEST_UPSTREAM_PROXY_PORT`, the test is automatically skipped.
+
+**Important:** Run test_96 in isolation (`--module test_96`), not as part of the full suite. `CCAS_UPSTREAM_HTTPS_PROXY` is a server-wide setting — when set, all network-isolated jobs route through the upstream proxy. The test proxy only runs during test_96; other AI tests (test_97–test_99) will fail if the server is configured to use an upstream proxy that is no longer running.
 
 ## Cleanup
 
