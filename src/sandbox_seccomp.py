@@ -272,10 +272,12 @@ def check_seccomp_at_startup(seccomp_dir: Optional[Path] = None) -> Optional[Sec
             seccomp_dir=str(seccomp_dir or DEFAULT_SECCOMP_DIR),
             message=(
                 "seccomp BPF hardening is NOT available. Network-isolated "
-                "jobs will run without socket-level enforcement. The HTTP "
-                "proxy still filters traffic, but bypass via direct socket "
-                "creation is theoretically possible. Install the vendored "
-                "seccomp binaries to /opt/ccas/seccomp/ for full protection."
+                "jobs will run without AF_UNIX socket-level enforcement. "
+                "TCP/UDP is still isolated by --unshare-net, but the process "
+                "can connect to host-side Unix sockets (Docker, dbus, etc.) "
+                "exposed via the read-only filesystem bind. Install the "
+                "vendored seccomp binaries to /opt/ccas/seccomp/ for full "
+                "protection."
             ),
         )
     return config

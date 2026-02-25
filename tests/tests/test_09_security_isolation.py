@@ -52,7 +52,7 @@ def test_client_cannot_use_other_clients_upload(api, test_client, second_test_cl
 
     # Client B tries to use it
     resp = api.post("/v1/jobs", headers={**headers_b, "X-Anthropic-Key": DUMMY_ANTHROPIC_KEY}, json={
-        "upload_id": upload_id,
+        "upload_ids": [upload_id],
         "prompt": "steal upload",
     })
     # App may return 403 (explicit ownership check) or 400 (upload not found for this client)
@@ -67,7 +67,7 @@ def test_client_can_use_own_upload(api, test_client):
     upload_id = resp.json()["upload_id"]
 
     resp = api.post("/v1/jobs", headers={**headers, "X-Anthropic-Key": DUMMY_ANTHROPIC_KEY}, json={
-        "upload_id": upload_id,
+        "upload_ids": [upload_id],
         "prompt": "use own upload",
     })
     assert resp.status_code == 202

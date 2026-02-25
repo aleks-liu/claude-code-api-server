@@ -91,7 +91,7 @@ For each vulnerability found, report:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Unique identifier. Lowercase letters, digits, and hyphens only. |
+| `name` | Yes | Unique identifier. Letters, digits, and hyphens only; must start with a letter. |
 | `description` | Yes | Short description shown to Claude when selecting agents via the `Task` tool. |
 | `tools` | No | Comma-separated list or YAML list of allowed tools. If omitted, the agent inherits default tools. Examples: `Read, Grep, Bash` or `[Read, Grep, Bash]` |
 | `model` | No | Model override: `sonnet`, `opus`, `haiku`, or `inherit`. If omitted, the agent uses the job's model. |
@@ -104,7 +104,7 @@ Everything after the closing `---` is the agent's system prompt. This is the ful
 
 ## Add an Agent
 
-Agent content is passed as base64-encoded content via the Admin API:
+Agent content can be passed as base64-encoded or plain text via the Admin API:
 
 ```bash
 # Encode and send
@@ -132,7 +132,7 @@ curl -X POST http://localhost:8000/v1/admin/agents \
 ```
 
 **Validation rules:**
-- Agent name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens (max 64 characters)
+- Agent name must start with a letter and contain only letters, digits, and hyphens
 - The `name` field in YAML frontmatter must match the API request name
 - Frontmatter must include both `name` and `description` fields
 - Prompt body cannot be empty
@@ -222,5 +222,7 @@ This means:
 - Network access is governed by the client's security profile — unrestricted for `unconfined`, filtered through a per-job proxy for other profiles (Anthropic API is always allowed)
 
 For details on the bwrap sandbox, see [Security — Sandbox Isolation](security-model.md#sandbox-isolation-bwrap).
+
+**CLI alternative:** `python cli/manage.py agent` provides a friendlier command-line interface for agent management. See [Usage Examples](usage-examples.md#ccas-manager-climanagepy--server-administration).
 
 See [API Reference — Agent Management](api-reference.md#agent-management) for full endpoint details.

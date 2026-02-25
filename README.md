@@ -143,17 +143,13 @@ python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --workers 1
 # Health check
 curl http://localhost:8000/v1/health
 
-# Create a client via admin API
-curl -X POST http://localhost:8000/v1/admin/clients \
-  -H "Authorization: Bearer YOUR_ADMIN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"client_id": "my-pipeline", "description": "CI/CD pipeline"}'
+# Create a client
+python cli/manage.py client add my-pipeline --description "CI/CD pipeline"
 
-# Upload a test archive
-zip -r test.zip ./src
-curl -X POST http://localhost:8000/v1/uploads \
-  -H "Authorization: Bearer CLIENT_API_KEY" \
-  -F "file=@test.zip"
+# Run a job (uploads ./src automatically)
+export CCAS_CLIENT_API_KEY="CLIENT_KEY_FROM_ABOVE"
+export ANTHROPIC_API_KEY="sk-ant-..."
+python cli/client.py run --files ./src "Analyze this code for security issues"
 ```
 
 See [Usage Examples](docs/usage-examples.md) for complete end-to-end workflows including n8n integration.
@@ -170,7 +166,7 @@ See [Usage Examples](docs/usage-examples.md) for complete end-to-end workflows i
 | [Subagents](docs/subagents.md) | Defining and managing custom subagents |
 | [Skills](docs/skills.md) | Plugin-based skills: auto-invocable capabilities for Claude Code |
 | [API Reference](docs/api-reference.md) | Endpoints, request/response formats, error codes |
-| [Usage Examples](docs/usage-examples.md) | cURL workflow, Python client, n8n integration |
+| [Usage Examples](docs/usage-examples.md) | CLI tools, cURL reference, n8n integration |
 | [Security](docs/security-model.md) | Sandbox isolation, authentication, directory isolation |
 | [Operations](docs/operations.md) | Logging, health monitoring, cleanup, backup |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and debug mode |

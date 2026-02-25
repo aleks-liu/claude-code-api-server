@@ -1,13 +1,14 @@
 """
 Skill definition management for Claude Code API Server.
 
-Manages skill definition files (SKILL.md with YAML frontmatter) and
+Manages skill directories (containing SKILL.md + optional subdirs) and
 their metadata.  Skills are directory-based extensions delivered to
 Claude Code via the plugin mechanism (``--plugin-dir``).
 
 Unlike subagents (which are flat ``.md`` files passed via
 ``options.agents``), skills are **filesystem-based**: each skill is a
-directory containing a ``SKILL.md`` file, stored inside a plugin
+directory containing a ``SKILL.md`` file (and optionally ``scripts/``,
+``references/``, ``assets/`` subdirectories), stored inside a plugin
 directory that Claude Code discovers at startup.
 
 Storage layout::
@@ -18,6 +19,10 @@ Storage layout::
     +-- skills/
         +-- vuln-scanner/
         |   +-- SKILL.md
+        |   +-- scripts/
+        |   |   +-- analyze.py
+        |   +-- references/
+        |       +-- owasp-guide.md
         +-- code-reviewer/
             +-- SKILL.md
 
@@ -28,24 +33,26 @@ Storage layout::
 Plugin manifest (plugin.json)::
 
     {
-      "name": "cca-skills",
-      "description": "Server-managed skills for Claude Code API Server",
+      "name": "ccas-plugin",
+      "description": "Server-managed plugins for Claude Code API Server",
       "version": "1.0.0"
     }
 
-All skills are namespaced as ``cca-skills:<skill-name>`` by Claude Code.
+All skills are namespaced as ``ccas-plugin:<skill-name>`` by Claude Code.
 """
 
 import fcntl
 import json
+import os
 import re
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .logging_config import get_logger
-from .models import SkillEntry, utcnow
+from .models import MAX_NAME_LENGTH, SkillEntry, utcnow
 
 logger = get_logger(__name__)
 
@@ -54,12 +61,13 @@ logger = get_logger(__name__)
 # Constants
 # =============================================================================
 
-PLUGIN_NAME = "cca-skills"
-PLUGIN_DESCRIPTION = "Server-managed skills for Claude Code API Server"
+PLUGIN_NAME = "ccas-plugin"
+PLUGIN_DESCRIPTION = "Server-managed plugins for Claude Code API Server"
 PLUGIN_VERSION = "1.0.0"
 
-# Skill name must start with a lowercase letter, then lowercase + digits + hyphens.
-_SKILL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
+# Skill name must start with a letter, then letters + digits + hyphens.
+# Case-insensitive uniqueness is enforced at the manager level.
+_SKILL_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9-]*$")
 
 # Maximum size of a single SKILL.md file (500 KB).
 MAX_SKILL_FILE_SIZE = 512_000
@@ -107,7 +115,8 @@ def ensure_plugin_manifest(plugin_dir: Path) -> None:
     Create or verify the plugin.json manifest.
 
     If ``plugin.json`` does not exist, creates it with the fixed plugin
-    identity.  If it exists, does nothing (idempotent).
+    identity.  If it exists but the ``name`` field does not match
+    ``PLUGIN_NAME``, regenerates it (self-healing for renames).
 
     Args:
         plugin_dir: Root of the plugin directory (parent of ``.claude-plugin/``).
@@ -116,8 +125,20 @@ def ensure_plugin_manifest(plugin_dir: Path) -> None:
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_path = manifest_dir / "plugin.json"
+
     if manifest_path.exists():
-        return
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if existing.get("name") == PLUGIN_NAME:
+                return  # Up to date
+            logger.info(
+                "plugin_manifest_stale",
+                old_name=existing.get("name"),
+                new_name=PLUGIN_NAME,
+                message="Plugin manifest name mismatch — regenerating.",
+            )
+        except (json.JSONDecodeError, OSError):
+            pass  # Corrupt or unreadable — regenerate
 
     manifest = {
         "name": PLUGIN_NAME,
@@ -157,14 +178,14 @@ def validate_skill_name(name: str) -> None:
     """
     if not name:
         raise SkillValidationError("Skill name cannot be empty")
-    if len(name) > 64:
+    if len(name) > MAX_NAME_LENGTH:
         raise SkillValidationError(
-            f"Skill name too long ({len(name)} chars, max 64)"
+            f"Skill name too long ({len(name)} chars, max {MAX_NAME_LENGTH})"
         )
     if not _SKILL_NAME_PATTERN.match(name):
         raise SkillValidationError(
-            f"Skill name '{name}' is invalid. Must start with a lowercase "
-            "letter and contain only lowercase letters, digits, and hyphens."
+            f"Skill name '{name}' is invalid. Must start with a letter "
+            "and contain only letters, digits, and hyphens."
         )
 
 
@@ -262,10 +283,11 @@ def validate_skill_content(content: str, name: str) -> tuple[dict[str, Any], str
 
 class SkillManager:
     """
-    Manages skill definition files and metadata.
+    Manages skill directories and metadata.
 
-    Provides CRUD operations on ``/data/skills-plugin/skills/<name>/SKILL.md``
-    and the ``/data/skills-meta/skills.json`` metadata registry.
+    Provides CRUD operations on skill directories under
+    ``/data/skills-plugin/skills/<name>/`` and the
+    ``/data/skills-meta/skills.json`` metadata registry.
 
     Thread/process safety: file-based locking via ``/data/skills-meta/.lock``
     prevents concurrent modification from multiple concurrent requests.
@@ -326,6 +348,7 @@ class SkillManager:
                     description=meta.get("description", ""),
                     added_at=added_at,
                     skill_size_bytes=meta.get("skill_size_bytes", 0),
+                    file_count=meta.get("file_count", 1),
                 )
 
             logger.info(
@@ -367,6 +390,7 @@ class SkillManager:
                 "added_at": entry.added_at.isoformat(),
                 "description": entry.description,
                 "skill_size_bytes": entry.skill_size_bytes,
+                "file_count": entry.file_count,
             }
 
         data = {"_metadata": raw_meta}
@@ -400,48 +424,8 @@ class SkillManager:
             ) from exc
 
     # =========================================================================
-    # Internal -- Skill File I/O (directory-based)
+    # Internal -- Skill Directory I/O
     # =========================================================================
-
-    @staticmethod
-    def _ensure_frontmatter(content: str, name: str, description: str) -> str:
-        """
-        Ensure the content has YAML frontmatter.
-
-        If the content already starts with ``---``, it is returned
-        unchanged.  Otherwise, a frontmatter block is generated from
-        the ``name`` and ``description`` arguments and prepended to
-        the content.
-
-        Args:
-            content: Raw file content (may or may not have frontmatter).
-            name: Skill name to inject.
-            description: Description to inject (required if generating).
-
-        Returns:
-            Content with frontmatter guaranteed present.
-
-        Raises:
-            SkillValidationError: If frontmatter must be generated but
-                no description was provided.
-        """
-        stripped = content.lstrip()
-        if stripped.startswith("---"):
-            return content
-
-        # No frontmatter — generate one from CLI arguments
-        if not description:
-            raise SkillValidationError(
-                "Content has no YAML frontmatter. Provide --description "
-                "so that frontmatter can be auto-generated, or add a "
-                "frontmatter block (--- ... ---) to the file."
-            )
-
-        from .agent_manager import compose_agent_file
-
-        frontmatter = {"name": name, "description": description}
-        body = content
-        return compose_agent_file(frontmatter, body)
 
     def _skill_dir_path(self, name: str) -> Path:
         """Return path to a skill's directory."""
@@ -450,52 +434,6 @@ class SkillManager:
     def _skill_file_path(self, name: str) -> Path:
         """Return path to a skill's SKILL.md file."""
         return self._skills_dir / name / SKILL_FILENAME
-
-    def _write_skill(self, name: str, content: str) -> int:
-        """
-        Write SKILL.md into the skill directory.
-
-        Creates the skill directory if it does not exist.
-        Uses atomic tmp+rename to prevent partial writes.
-
-        Args:
-            name: Skill name (determines directory name).
-            content: Full file content (frontmatter + body).
-
-        Returns:
-            Size of the written file in bytes.
-
-        Raises:
-            SkillError: If the file cannot be written.
-        """
-        skill_dir = self._skill_dir_path(name)
-        skill_dir.mkdir(parents=True, exist_ok=True)
-
-        target = self._skill_file_path(name)
-        tmp_path = target.with_suffix(".md.tmp")
-
-        try:
-            encoded = content.encode("utf-8")
-            tmp_path.write_bytes(encoded)
-            tmp_path.rename(target)
-
-            logger.info(
-                "skill_file_written",
-                skill_name=name,
-                path=str(target),
-                size_bytes=len(encoded),
-            )
-            return len(encoded)
-
-        except Exception as exc:
-            # Clean up temp file on failure
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise SkillError(
-                f"Failed to write skill file for '{name}': {exc}"
-            ) from exc
 
     def _read_skill(self, name: str) -> str | None:
         """
@@ -548,24 +486,116 @@ class SkillManager:
             ) from exc
 
     # =========================================================================
+    # Internal -- Atomic Directory Operations
+    # =========================================================================
+
+    def _atomic_install_directory(self, name: str, source_dir: Path) -> None:
+        """
+        Atomically install a skill directory (for new skills).
+
+        Renames ``source_dir`` to the final skill directory path.
+        Both must be on the same filesystem for atomic rename.
+
+        Args:
+            name: Skill name (determines final directory name).
+            source_dir: Temp directory containing the extracted skill.
+
+        Raises:
+            SkillError: If the rename fails.
+        """
+        target = self._skill_dir_path(name)
+        try:
+            os.rename(source_dir, target)
+            logger.info(
+                "skill_directory_installed",
+                skill_name=name,
+                source=str(source_dir),
+                target=str(target),
+            )
+        except OSError as exc:
+            raise SkillError(
+                f"Failed to install skill directory for '{name}': {exc}"
+            ) from exc
+
+    def _atomic_replace_directory(self, name: str, source_dir: Path) -> None:
+        """
+        Atomically replace an existing skill directory.
+
+        Strategy:
+          1. Rename existing to ``.old-<uuid>`` (backup)
+          2. Rename source to final name (install)
+          3. Delete backup
+          On failure at step 2: rollback by renaming backup back.
+
+        Args:
+            name: Skill name.
+            source_dir: Temp directory containing the new skill.
+
+        Raises:
+            SkillError: If the replacement fails.
+        """
+        target = self._skill_dir_path(name)
+        backup = self._skills_dir / f".old-{uuid.uuid4().hex[:12]}"
+
+        try:
+            # Step 1: backup existing
+            os.rename(target, backup)
+        except OSError as exc:
+            raise SkillError(
+                f"Failed to backup existing skill directory for '{name}': {exc}"
+            ) from exc
+
+        try:
+            # Step 2: install new
+            os.rename(source_dir, target)
+        except OSError as exc:
+            # Rollback: restore backup
+            try:
+                os.rename(backup, target)
+            except OSError:
+                pass  # Best effort rollback
+            raise SkillError(
+                f"Failed to install updated skill directory for '{name}': {exc}"
+            ) from exc
+
+        # Step 3: cleanup backup
+        try:
+            shutil.rmtree(backup)
+        except OSError as exc:
+            logger.warning(
+                "skill_backup_cleanup_failed",
+                skill_name=name,
+                backup_path=str(backup),
+                error=str(exc),
+            )
+
+    # =========================================================================
     # Public API
     # =========================================================================
 
-    def add_skill(self, name: str, content: str, description: str = "") -> SkillEntry:
+    def add_skill(
+        self,
+        name: str,
+        source_dir: Path,
+        skill_md_content: str,
+        file_count: int,
+        total_size_bytes: int,
+        file_listing: list[str],
+    ) -> SkillEntry:
         """
-        Add a new skill definition.
+        Add a new skill from a validated extracted directory.
 
-        The ``content`` must be a complete SKILL.md file with YAML
-        frontmatter containing at least ``description``.  If the
-        content has no frontmatter at all, it is auto-generated using
-        the CLI-provided ``name`` and ``description``.  If frontmatter
-        exists but is missing the ``name`` field, it is injected.
+        The ``source_dir`` must contain the full skill structure
+        (SKILL.md + optional subdirs) and must already be validated.
+        It will be atomically renamed to the final location.
 
         Args:
             name: Unique skill name.
-            content: Full SKILL.md file content (may lack frontmatter).
-            description: Optional description override for metadata
-                (if empty, extracted from frontmatter).
+            source_dir: Temp directory with extracted skill contents.
+            skill_md_content: Content of SKILL.md (already validated).
+            file_count: Number of files in the skill directory.
+            total_size_bytes: Total uncompressed size.
+            file_listing: Sorted list of relative file paths.
 
         Returns:
             The created SkillEntry metadata.
@@ -581,36 +611,33 @@ class SkillManager:
                 f"Skill '{name}' already exists."
             )
 
-        # Auto-generate frontmatter if content has none and a CLI
-        # description is available.  This lets users pass plain
-        # markdown files without manually adding YAML headers.
-        content = self._ensure_frontmatter(content, name, description)
+        # Case-insensitive uniqueness: prevent "MySkill" when "myskill" exists
+        name_lower = name.lower()
+        for existing in self._metadata:
+            if existing.lower() == name_lower and existing != name:
+                raise SkillExistsError(
+                    f"Skill '{name}' conflicts with existing skill "
+                    f"'{existing}' (names differ only in case)."
+                )
 
-        frontmatter, body = validate_skill_content(content, name)
+        # Parse frontmatter for description
+        frontmatter, _body = validate_skill_content(skill_md_content, name)
 
-        # Inject 'name' into frontmatter if not present
-        if "name" not in frontmatter:
-            frontmatter["name"] = name
-            # Re-compose content with injected name
-            from .agent_manager import compose_agent_file
-
-            content = compose_agent_file(frontmatter, body)
-
-        # Write SKILL.md
-        size_bytes = self._write_skill(name, content)
+        # Atomic install
+        self._atomic_install_directory(name, source_dir)
 
         # Ensure plugin manifest
         ensure_plugin_manifest(self._plugin_dir)
 
-        # Use frontmatter description if no explicit override provided
-        final_description = description or frontmatter.get("description", "")
+        description = frontmatter.get("description", "")
 
         # Update metadata
         entry = SkillEntry(
             name=name,
-            description=final_description,
+            description=description,
             added_at=utcnow(),
-            skill_size_bytes=size_bytes,
+            skill_size_bytes=total_size_bytes,
+            file_count=file_count,
         )
         self._metadata[name] = entry
         self._save_metadata()
@@ -618,8 +645,76 @@ class SkillManager:
         logger.info(
             "skill_added",
             skill_name=name,
-            description=final_description,
-            skill_size_bytes=size_bytes,
+            description=description,
+            skill_size_bytes=total_size_bytes,
+            file_count=file_count,
+        )
+
+        return entry
+
+    def update_skill(
+        self,
+        name: str,
+        source_dir: Path,
+        skill_md_content: str,
+        file_count: int,
+        total_size_bytes: int,
+        file_listing: list[str],
+    ) -> SkillEntry:
+        """
+        Update an existing skill by replacing its directory.
+
+        The existing directory is atomically replaced with the new
+        one from ``source_dir``.
+
+        Args:
+            name: Skill name to update.
+            source_dir: Temp directory with new skill contents.
+            skill_md_content: Content of new SKILL.md (already validated).
+            file_count: Number of files in the new skill directory.
+            total_size_bytes: Total uncompressed size.
+            file_listing: Sorted list of relative file paths.
+
+        Returns:
+            Updated SkillEntry.
+
+        Raises:
+            SkillNotFoundError: If the skill does not exist.
+            SkillValidationError: If new content fails validation.
+        """
+        if name not in self._metadata and not self._skill_file_path(name).exists():
+            raise SkillNotFoundError(
+                f"Skill '{name}' not found."
+            )
+
+        # Parse frontmatter for description
+        frontmatter, _body = validate_skill_content(skill_md_content, name)
+
+        # Atomic replace
+        self._atomic_replace_directory(name, source_dir)
+
+        # Ensure plugin manifest
+        ensure_plugin_manifest(self._plugin_dir)
+
+        description = frontmatter.get("description", "")
+
+        # Update metadata (preserve added_at from existing entry)
+        existing = self._metadata.get(name)
+        entry = SkillEntry(
+            name=name,
+            description=description,
+            added_at=existing.added_at if existing else utcnow(),
+            skill_size_bytes=total_size_bytes,
+            file_count=file_count,
+        )
+        self._metadata[name] = entry
+        self._save_metadata()
+
+        logger.info(
+            "skill_updated",
+            skill_name=name,
+            skill_size_bytes=total_size_bytes,
+            file_count=file_count,
         )
 
         return entry
@@ -653,19 +748,43 @@ class SkillManager:
 
         return entry
 
-    def get_skill(self, name: str) -> tuple[SkillEntry | None, str | None]:
+    def get_skill(self, name: str) -> tuple[SkillEntry | None, str | None, list[str]]:
         """
-        Get a specific skill's metadata and file content.
+        Get a specific skill's metadata, file content, and file listing.
 
         Args:
             name: Skill name.
 
         Returns:
-            Tuple of (SkillEntry or None, file_content or None).
+            Tuple of (SkillEntry or None, SKILL.md content or None, file_listing).
         """
         entry = self._metadata.get(name)
         content = self._read_skill(name)
-        return entry, content
+        file_listing = self.list_skill_files(name)
+        return entry, content, file_listing
+
+    def list_skill_files(self, name: str) -> list[str]:
+        """
+        List all files in a skill's directory as relative paths.
+
+        Args:
+            name: Skill name.
+
+        Returns:
+            Sorted list of relative file paths, or empty list if
+            the skill directory does not exist.
+        """
+        skill_dir = self._skill_dir_path(name)
+        if not skill_dir.is_dir():
+            return []
+
+        files: list[str] = []
+        for path in skill_dir.rglob("*"):
+            if path.is_file():
+                files.append(str(path.relative_to(skill_dir)))
+
+        files.sort()
+        return files
 
     def list_skills(self) -> list[SkillEntry]:
         """
@@ -682,7 +801,11 @@ class SkillManager:
         disk_skills: set[str] = set()
         if self._skills_dir.is_dir():
             for path in self._skills_dir.iterdir():
-                if path.is_dir() and (path / SKILL_FILENAME).exists():
+                if (
+                    path.is_dir()
+                    and not path.name.startswith(".")
+                    and (path / SKILL_FILENAME).exists()
+                ):
                     disk_skills.add(path.name)
 
         # Report orphaned directories (on disk but not in metadata)
@@ -728,92 +851,19 @@ class SkillManager:
                     skill_description = frontmatter.get("description", "")
                 except (AgentValidationError, Exception):
                     skill_description = "(invalid frontmatter)"
+
+                file_count = len(self.list_skill_files(name))
+
                 result.append(
                     SkillEntry(
                         name=name,
                         description=f"[untracked] {skill_description}",
                         skill_size_bytes=len(content.encode("utf-8")),
+                        file_count=max(file_count, 1),
                     )
                 )
 
         return result
-
-    def update_skill(
-        self,
-        name: str,
-        content: str | None = None,
-        description: str | None = None,
-    ) -> SkillEntry:
-        """
-        Update an existing skill's definition or metadata.
-
-        If ``content`` is provided, the SKILL.md file is replaced
-        (validated first).  If only ``description`` is provided,
-        only the metadata is updated.
-
-        Args:
-            name: Skill name to update.
-            content: New file content (optional -- full replacement).
-            description: New description for metadata (optional).
-
-        Returns:
-            Updated SkillEntry.
-
-        Raises:
-            SkillNotFoundError: If the skill does not exist.
-            SkillValidationError: If new content fails validation.
-        """
-        if name not in self._metadata and not self._skill_file_path(name).exists():
-            raise SkillNotFoundError(
-                f"Skill '{name}' not found."
-            )
-
-        entry = self._metadata.get(name)
-
-        if content is not None:
-            content = self._ensure_frontmatter(content, name, description or "")
-            frontmatter, body = validate_skill_content(content, name)
-
-            # Inject 'name' into frontmatter if not present
-            if "name" not in frontmatter:
-                frontmatter["name"] = name
-                from .agent_manager import compose_agent_file
-
-                content = compose_agent_file(frontmatter, body)
-
-            size_bytes = self._write_skill(name, content)
-
-            # Ensure plugin manifest
-            ensure_plugin_manifest(self._plugin_dir)
-
-            if entry is None:
-                entry = SkillEntry(name=name, added_at=utcnow())
-
-            entry.skill_size_bytes = size_bytes
-
-            # Update description from frontmatter if not explicitly provided
-            if description is None:
-                entry.description = frontmatter.get(
-                    "description", entry.description
-                )
-
-        if entry is None:
-            entry = SkillEntry(name=name, added_at=utcnow())
-
-        if description is not None:
-            entry.description = description
-
-        self._metadata[name] = entry
-        self._save_metadata()
-
-        logger.info(
-            "skill_updated",
-            skill_name=name,
-            content_updated=content is not None,
-            description_updated=description is not None,
-        )
-
-        return entry
 
     def has_skills(self) -> bool:
         """Check whether any skills are configured (directories on disk)."""

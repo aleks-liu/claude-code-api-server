@@ -104,10 +104,21 @@ def test_add_agent_empty_body_returns_422(api, admin_headers):
 
 def test_add_agent_invalid_name_returns_422(api, admin_headers):
     resp = api.post("/v1/admin/agents", headers=admin_headers, json={
-        "name": "HAS_UPPERCASE",
-        "content": make_agent_content("HAS_UPPERCASE"),
+        "name": "has spaces!",
+        "content": make_agent_content("has spaces!"),
     })
     assert resp.status_code == 422
+
+
+def test_add_agent_uppercase_name_accepted(api, admin_headers):
+    name = f"UpperAgent-{_agent_name()}"
+    content = make_agent_content(name)
+    resp = api.post("/v1/admin/agents", headers=admin_headers, json={
+        "name": name,
+        "content": content,
+    })
+    assert resp.status_code == 201
+    api.delete(f"/v1/admin/agents/{name}", headers=admin_headers)
 
 
 def test_list_agents(api, admin_headers):

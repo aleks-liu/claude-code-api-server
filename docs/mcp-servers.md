@@ -26,7 +26,7 @@ When MCP servers are configured, the server:
 
 1. **At startup**: loads `servers.json`, expands `${ENV_VAR}` placeholders, health-checks each stdio server by sending a JSON-RPC `initialize` request
 2. **Per job**: passes the MCP server config to the Claude Agent SDK (filtered by the client's security profile `allowed_mcp_servers`), adds `mcp__<name>__*` patterns to `allowed_tools`, and exposes package directories read-only inside the bwrap sandbox
-3. **At `/v1/health`**: reports MCP server status (`ok`, `skipped`, or `failed`)
+3. **At `GET /v1/admin/status`**: reports MCP server status (`ok`, `skipped`, or `failed`)
 
 ---
 
@@ -157,7 +157,9 @@ curl -X DELETE "http://localhost:8000/v1/admin/mcp/sequential-thinking?keep_pack
 
 ## Startup Behavior
 
-At startup, the server health-checks all configured stdio MCP servers. Servers that fail their health check are **removed from the active configuration** and the server starts in **degraded mode** — failed servers are excluded from jobs but the server operates normally. A `mcp_health_check_degraded` warning is logged listing the failed servers.
+At startup, the server health-checks all configured stdio MCP servers. Servers that fail their health check are removed from the **in-memory** startup snapshot and a `mcp_health_check_degraded` warning is logged listing the failed servers.
+
+> **Note:** MCP configuration is reloaded from disk per-job, so failed servers will reappear in subsequent jobs if the underlying configuration on disk (`servers.json`) is not updated. To permanently remove a failing server, delete it via the admin API (`DELETE /v1/admin/mcp/<name>`).
 
 ---
 

@@ -15,7 +15,10 @@ import base64
 import gzip
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import (
+    APIRouter, Depends, File, Form, HTTPException, Path, Query, Request,
+    UploadFile, status,
+)
 
 from .auth import AuthManager, ClientInfo, get_admin_client, get_auth_manager
 from .agent_manager import (
@@ -31,10 +34,10 @@ from .logging_config import get_logger
 from .mcp_loader import check_mcp_server, load_mcp_config
 from .mcp_manager import McpManager, McpServerExistsError
 from .models import (
+    MAX_NAME_LENGTH,
     AddAgentRequest,
     AdminStatusResponse,
     AddMcpServerRequest,
-    AddSkillRequest,
     AgentDetailResponse,
     AgentResponse,
     ClientResponse,
@@ -51,7 +54,6 @@ from .models import (
     UpdateAgentRequest,
     UpdateClientRequest,
     UpdateProfileRequest,
-    UpdateSkillRequest,
 )
 from .security_profiles import (
     SecurityProfileManager,
@@ -62,11 +64,18 @@ from .security_profiles import (
     get_profile_manager,
 )
 from .skill_manager import (
-    MAX_SKILL_FILE_SIZE,
     SkillExistsError,
     SkillManager,
     SkillNotFoundError,
     SkillValidationError,
+)
+from .skill_zip_handler import (
+    SkillZipError,
+    SkillZipSecurityError,
+    SkillZipSizeError,
+    SkillZipStructureError,
+    MAX_SKILL_ZIP_SIZE,
+    validate_and_extract_skill_zip,
 )
 
 logger = get_logger(__name__)
@@ -299,7 +308,7 @@ async def list_clients(
     summary="Get a specific client",
 )
 async def get_client(
-    client_id: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    client_id: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Get details of a specific client."""
@@ -328,7 +337,7 @@ async def get_client(
     summary="Delete a client",
 )
 async def delete_client(
-    client_id: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    client_id: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Delete a client. Admins cannot delete themselves."""
@@ -369,7 +378,7 @@ async def delete_client(
     summary="Activate a client",
 )
 async def activate_client(
-    client_id: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    client_id: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Activate a deactivated client."""
@@ -404,7 +413,7 @@ async def activate_client(
     summary="Deactivate a client",
 )
 async def deactivate_client(
-    client_id: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    client_id: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Deactivate a client (soft delete)."""
@@ -455,7 +464,7 @@ async def deactivate_client(
     summary="Update a client",
 )
 async def update_client(
-    client_id: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    client_id: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     request: UpdateClientRequest,
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
@@ -600,7 +609,7 @@ async def list_security_profiles(
     summary="Get security profile details",
 )
 async def get_security_profile(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Get details of a specific security profile."""
@@ -632,7 +641,7 @@ async def get_security_profile(
     summary="Update a security profile",
 )
 async def update_security_profile(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     request: UpdateProfileRequest,
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
@@ -684,7 +693,7 @@ async def update_security_profile(
     summary="Delete a security profile",
 )
 async def delete_security_profile(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Delete a security profile. Built-in profiles cannot be deleted."""
@@ -729,7 +738,7 @@ async def delete_security_profile(
     summary="Set default security profile",
 )
 async def set_default_security_profile(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Set a profile as the server-wide default for new clients."""
@@ -965,7 +974,7 @@ async def list_mcp_servers(
     summary="Get MCP server details",
 )
 async def get_mcp_server(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Get details of a specific MCP server."""
@@ -994,7 +1003,7 @@ async def get_mcp_server(
     summary="Remove MCP server",
 )
 async def remove_mcp_server(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
     keep_package: Annotated[bool, Query()] = False,
 ):
@@ -1055,7 +1064,7 @@ async def health_check_all_mcp_servers(
     summary="Health check specific MCP server",
 )
 async def health_check_mcp_server(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Run health check on a specific MCP server."""
@@ -1171,7 +1180,7 @@ async def list_agents(
     summary="Get agent details",
 )
 async def get_agent(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Get detailed information about a specific agent."""
@@ -1212,7 +1221,7 @@ async def get_agent(
     summary="Update agent",
 )
 async def update_agent(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     request: UpdateAgentRequest,
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
@@ -1273,7 +1282,7 @@ async def update_agent(
     summary="Remove agent",
 )
 async def remove_agent(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Remove a subagent definition."""
@@ -1305,33 +1314,77 @@ async def remove_agent(
     summary="Add a skill",
 )
 async def add_skill(
-    request: AddSkillRequest,
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
+    skill_data: Annotated[UploadFile, File(description="ZIP archive of skill directory")],
+    name: Annotated[str | None, Form(description="Override skill name (default: from ZIP root dir)")] = None,
 ):
-    """Add a new skill definition."""
+    """
+    Add a new skill from a ZIP archive.
+
+    The ZIP must contain a skill directory with at least SKILL.md.
+    Optional subdirectories: scripts/, references/, assets/.
+    """
     skill_manager = _get_skill_manager()
+    settings = get_settings()
 
-    content = _get_content(request.content, request.content_base64)
-    if content is None:
+    # Stream-read with size enforcement
+    max_size = MAX_SKILL_ZIP_SIZE
+    chunks: list[bytes] = []
+    total_size = 0
+    chunk_size = 64 * 1024
+
+    while True:
+        chunk = await skill_data.read(chunk_size)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_size:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"ZIP archive exceeds maximum size of {max_size / (1024 * 1024):.0f} MB",
+            )
+        chunks.append(chunk)
+
+    zip_bytes = b"".join(chunks)
+    if not zip_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Either 'content' or 'content_base64' must be provided",
+            detail="Empty file uploaded",
         )
 
-    # Size check
-    content_bytes = len(content.encode("utf-8"))
-    if content_bytes > MAX_SKILL_FILE_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Content too large ({content_bytes:,} bytes, max {MAX_SKILL_FILE_SIZE:,})",
-        )
-
+    # Validate and extract
+    result = None
     try:
-        entry = skill_manager.add_skill(
-            name=request.name,
-            content=content,
-            description=request.description,
+        result = validate_and_extract_skill_zip(
+            zip_bytes,
+            name_override=name,
+            temp_parent=settings.skills_dir,
         )
+
+        entry = skill_manager.add_skill(
+            name=result.skill_name,
+            source_dir=result.temp_dir,
+            skill_md_content=result.skill_md_content,
+            file_count=result.file_count,
+            total_size_bytes=result.total_size_bytes,
+            file_listing=result.file_listing,
+        )
+
+        logger.info(
+            "admin_skill_added",
+            skill_name=result.skill_name,
+            file_count=result.file_count,
+            by_admin=admin.client_id,
+        )
+
+        return SkillResponse(
+            name=entry.name,
+            description=entry.description,
+            skill_size_bytes=entry.skill_size_bytes,
+            file_count=entry.file_count,
+            added_at=entry.added_at,
+        )
+
     except SkillExistsError as e:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1342,19 +1395,30 @@ async def add_skill(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(e),
         )
-
-    logger.info(
-        "admin_skill_added",
-        skill_name=request.name,
-        by_admin=admin.client_id,
-    )
-
-    return SkillResponse(
-        name=entry.name,
-        description=entry.description,
-        skill_size_bytes=entry.skill_size_bytes,
-        added_at=entry.added_at,
-    )
+    except SkillZipSizeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(e),
+        )
+    except SkillZipSecurityError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except SkillZipStructureError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except SkillZipError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    finally:
+        # Cleanup temp dir if it still exists (not moved by add_skill)
+        if result is not None:
+            result.cleanup()
 
 
 @router.get(
@@ -1374,6 +1438,7 @@ async def list_skills(
             name=s.name,
             description=s.description,
             skill_size_bytes=s.skill_size_bytes,
+            file_count=s.file_count,
             added_at=s.added_at,
         )
         for s in skills
@@ -1386,12 +1451,12 @@ async def list_skills(
     summary="Get skill details",
 )
 async def get_skill(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Get detailed information about a specific skill."""
     skill_manager = _get_skill_manager()
-    entry, content = skill_manager.get_skill(name)
+    entry, content, file_listing = skill_manager.get_skill(name)
 
     if content is None:
         raise HTTPException(
@@ -1415,9 +1480,11 @@ async def get_skill(
         name=entry.name if entry else name,
         description=entry.description if entry else "",
         skill_size_bytes=entry.skill_size_bytes if entry else len(content.encode("utf-8")),
+        file_count=entry.file_count if entry else len(file_listing),
         added_at=entry.added_at if entry else None,
         frontmatter=frontmatter,
         body_preview=body_preview,
+        file_listing=file_listing,
     )
 
 
@@ -1427,36 +1494,76 @@ async def get_skill(
     summary="Update skill",
 )
 async def update_skill(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
-    request: UpdateSkillRequest,
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
+    skill_data: Annotated[UploadFile, File(description="ZIP archive of skill directory")],
 ):
-    """Update an existing skill definition."""
+    """
+    Replace an existing skill with a new ZIP archive.
+
+    Full replacement — the entire skill directory is swapped atomically.
+    """
     skill_manager = _get_skill_manager()
+    settings = get_settings()
 
-    content = _get_content(request.content, request.content_base64)
+    # Stream-read with size enforcement
+    max_size = MAX_SKILL_ZIP_SIZE
+    chunks: list[bytes] = []
+    total_size = 0
+    chunk_size = 64 * 1024
 
-    if content is None and request.description is None:
+    while True:
+        chunk = await skill_data.read(chunk_size)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_size:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"ZIP archive exceeds maximum size of {max_size / (1024 * 1024):.0f} MB",
+            )
+        chunks.append(chunk)
+
+    zip_bytes = b"".join(chunks)
+    if not zip_bytes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Nothing to update. Provide 'content', 'content_base64', or 'description'",
+            detail="Empty file uploaded",
         )
 
-    # Size check
-    if content is not None:
-        content_bytes = len(content.encode("utf-8"))
-        if content_bytes > MAX_SKILL_FILE_SIZE:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Content too large ({content_bytes:,} bytes, max {MAX_SKILL_FILE_SIZE:,})",
-            )
-
+    # Validate and extract
+    result = None
     try:
+        result = validate_and_extract_skill_zip(
+            zip_bytes,
+            name_override=name,
+            temp_parent=settings.skills_dir,
+        )
+
         entry = skill_manager.update_skill(
             name=name,
-            content=content,
-            description=request.description,
+            source_dir=result.temp_dir,
+            skill_md_content=result.skill_md_content,
+            file_count=result.file_count,
+            total_size_bytes=result.total_size_bytes,
+            file_listing=result.file_listing,
         )
+
+        logger.info(
+            "admin_skill_updated",
+            skill_name=name,
+            file_count=result.file_count,
+            by_admin=admin.client_id,
+        )
+
+        return SkillResponse(
+            name=entry.name,
+            description=entry.description,
+            skill_size_bytes=entry.skill_size_bytes,
+            file_count=entry.file_count,
+            added_at=entry.added_at,
+        )
+
     except SkillNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1467,19 +1574,19 @@ async def update_skill(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(e),
         )
-
-    logger.info(
-        "admin_skill_updated",
-        skill_name=name,
-        by_admin=admin.client_id,
-    )
-
-    return SkillResponse(
-        name=entry.name,
-        description=entry.description,
-        skill_size_bytes=entry.skill_size_bytes,
-        added_at=entry.added_at,
-    )
+    except SkillZipSizeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(e),
+        )
+    except (SkillZipSecurityError, SkillZipStructureError, SkillZipError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    finally:
+        if result is not None:
+            result.cleanup()
 
 
 @router.delete(
@@ -1488,7 +1595,7 @@ async def update_skill(
     summary="Remove skill",
 )
 async def remove_skill(
-    name: Annotated[str, Path(min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')],
+    name: Annotated[str, Path(min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')],
     admin: Annotated[ClientInfo, Depends(get_admin_client)],
 ):
     """Remove a skill definition."""

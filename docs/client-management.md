@@ -161,6 +161,8 @@ This outputs the plaintext API key (e.g., `ccas_abc123...`). Save it securely.
 
 ## Managing Clients via Admin API
 
+> **Recommended:** Use `python cli/manage.py client` for a friendlier experience. See [Usage Examples](usage-examples.md#ccas-manager-climanagepy--server-administration).
+
 All client management is done via HTTP endpoints. See [API Reference — Admin API](api-reference.md#admin-api) for full details.
 
 ### Create a Client

@@ -2,12 +2,13 @@
 
 [← Back to README](../README.md)
 
-Skills extend Claude Code with reusable, invokable capabilities. Unlike [subagents](subagents.md) (which are spawned via the `Task` tool and run as child processes), skills are **plugin-based extensions** that Claude Code discovers via the `--plugin-dir` mechanism. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter and instructions.
+Skills extend Claude Code with reusable, invokable capabilities. Unlike [subagents](subagents.md) (which are spawned via the `Task` tool and run as child processes), skills are **plugin-based extensions** that Claude Code discovers via the `--plugin-dir` mechanism. Each skill is a directory containing a `SKILL.md` file with YAML frontmatter and instructions, plus optional subdirectories for scripts, references, and assets.
 
 ## Table of Contents
 
 - [Skills vs Subagents](#skills-vs-subagents)
 - [How Skills Work](#how-skills-work)
+- [Skill Directory Structure](#skill-directory-structure)
 - [Skill File Format](#skill-file-format)
 - [Add a Skill](#add-a-skill)
 - [List Skills](#list-skills)
@@ -15,6 +16,7 @@ Skills extend Claude Code with reusable, invokable capabilities. Unlike [subagen
 - [Update a Skill](#update-a-skill)
 - [Remove a Skill](#remove-a-skill)
 - [Storage Layout](#storage-layout)
+- [Security](#security)
 - [Sandbox Integration](#sandbox-integration)
 
 ---
@@ -23,11 +25,11 @@ Skills extend Claude Code with reusable, invokable capabilities. Unlike [subagen
 
 | Aspect | Skills | Subagents |
 |--------|--------|-----------|
-| **Delivery** | Plugin directory (`--plugin-dir`) | SDK parameter (`options.agents` dict) |
-| **Storage** | Directory per skill (`<name>/SKILL.md`) | Flat file per agent (`<name>.md`) |
-| **Discovery** | Claude Code CLI discovers from filesystem | Programmatically injected at job start |
+| **Delivery** | Plugin directory (`--plugin-dir`) | Plugin directory (`--plugin-dir`, synced from source) |
+| **Storage** | Directory per skill (`<name>/SKILL.md` + optional subdirs) | Flat file per agent (`<name>.md`) |
+| **Discovery** | Claude Code CLI discovers from `skills/` in plugin dir | Claude Code CLI discovers from `agents/` in plugin dir |
 | **Invocation** | Claude invokes via `/skill-name` or automatically based on description | Claude invokes via `Task` tool |
-| **Namespace** | `cca-skills:<name>` | Plain name |
+| **Namespace** | `ccas-plugin:<name>` | Plain name |
 | **User-invocable** | Supported (`user-invocable: true` frontmatter) | Not applicable |
 | **Context** | Can fork context (`context: fork`) | Inherits parent context |
 
@@ -42,40 +44,75 @@ Skills extend Claude Code with reusable, invokable capabilities. Unlike [subagen
 
 The integration uses Claude Code's **plugin mechanism**. All skills are stored inside a single plugin directory, which Claude Code discovers via the `--plugin-dir` flag.
 
-1. **Management**: Skill files (`SKILL.md` with YAML frontmatter) are written to `/data/skills-plugin/skills/<name>/SKILL.md` via the Admin API. A plugin manifest (`plugin.json`) is auto-generated.
+1. **Management**: Skill directories are uploaded as ZIP archives via the Admin API and extracted to `/data/skills-plugin/skills/<name>/`. A plugin manifest (`plugin.json`) is auto-generated.
 
 2. **Per-job attachment**: At job execution time, the server checks if any skills exist. If so, it passes the plugin directory to the Claude Agent SDK via `options.plugins = [{"type": "local", "path": "/data/skills-plugin"}]`. This translates to the `--plugin-dir` CLI flag.
 
-3. **CLI discovery**: Claude Code reads the plugin manifest, scans the `skills/` subdirectory, and registers each `SKILL.md` as a skill namespaced under `cca-skills:<name>`.
+3. **CLI discovery**: Claude Code reads the plugin manifest, scans the `skills/` subdirectory, and registers each `SKILL.md` as a skill namespaced under `ccas-plugin:<name>`.
 
 4. **No restart needed**: Since the plugin directory is attached at each job execution, additions and removals via the Admin API take effect immediately for new jobs.
 
 5. **Sandbox visibility**: The plugin directory is bind-mounted **read-only** into the bwrap sandbox so the CLI process can discover skills without having write access to them.
 
 ```
-POST /v1/admin/skills ──► /data/skills-plugin/skills/my-skill/SKILL.md
-                          /data/skills-plugin/.claude-plugin/plugin.json (auto)
-                                    │
-                      ┌─────────────┘
-                      ▼
-            Job execution starts
-                      │
-                      ▼
-             Server checks skills/ for */SKILL.md
-             Sets options.plugins = [{type: local, path: ...}]
-                      │
-                      ▼
-             bwrap bind-mounts /data/skills-plugin (read-only)
-             Claude Code CLI starts with --plugin-dir
-                      │
-                      ▼
-             CLI reads plugin.json, discovers skills/
-             Registers "cca-skills:my-skill"
-                      │
-                      ▼
-             Claude can now invoke the skill automatically
-             (or user invokes via /my-skill if user-invocable)
+POST /v1/admin/skills (multipart/form-data with ZIP)
+      │
+      ▼
+Validate & extract ZIP
+      │
+      ▼
+/data/skills-plugin/skills/my-skill/
+├── SKILL.md
+├── scripts/
+├── references/
+└── assets/
+      │
+      ▼
+Job execution starts
+      │
+      ▼
+Server checks skills/ for */SKILL.md
+Sets options.plugins = [{type: local, path: ...}]
+      │
+      ▼
+bwrap bind-mounts /data/skills-plugin (read-only)
+Claude Code CLI starts with --plugin-dir
+      │
+      ▼
+CLI reads plugin.json, discovers skills/
+Registers "ccas-plugin:my-skill"
+      │
+      ▼
+Claude can now invoke the skill automatically
+(or user invokes via /my-skill if user-invocable)
 ```
+
+---
+
+## Skill Directory Structure
+
+Each skill is a directory containing at minimum `SKILL.md`, plus optional subdirectories:
+
+```
+your-skill-name/
+├── SKILL.md              # Required — main skill file
+├── scripts/              # Optional — executable code
+│   ├── process_data.py
+│   └── validate.sh
+├── references/           # Optional — documentation
+│   ├── api-guide.md
+│   └── examples/
+└── assets/               # Optional — templates, etc.
+    └── report-template.md
+```
+
+**Allowed root-level entries:**
+- `SKILL.md` (required)
+- `scripts/` (optional)
+- `references/` (optional)
+- `assets/` (optional)
+
+No other top-level files or directories are allowed.
 
 ---
 
@@ -111,7 +148,7 @@ For each vulnerability found, report:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | No* | Unique identifier. If omitted, auto-injected from the API request name. If present, must match exactly. |
+| `name` | No* | Unique identifier. If omitted, resolved from the ZIP directory name or the API `name` parameter. If present, must match exactly. |
 | `description` | Yes | What the skill does. Claude uses this to decide when to auto-invoke it. |
 | `allowed-tools` | No | Comma-separated list of tools the skill may use. If omitted, inherits defaults. |
 | `model` | No | Model override (`sonnet`, `opus`, `haiku`). If omitted, uses the job's model. |
@@ -132,38 +169,39 @@ Everything after the closing `---` is the skill's instruction prompt. It can be 
 
 ## Add a Skill
 
+Skills are uploaded as ZIP archives via `multipart/form-data`:
+
 ```bash
-# From a SKILL.md file with frontmatter
+# Zip your skill directory
+cd /path/to/skills
+zip -r code-vuln-analysis.zip code-vuln-analysis/
+
+# Upload via API
 curl -X POST http://localhost:8000/v1/admin/skills \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "code-vuln-analysis",
-    "content_base64": "'$(base64 -w0 code-vuln-analysis-SKILL.md)'",
-    "description": "Analyze codebase for security vulnerabilities"
-  }'
+  -F "skill_data=@code-vuln-analysis.zip"
 ```
 
-For large files, gzip-compress before base64 encoding — the server auto-detects and decompresses:
+The skill name is derived from the root directory name in the ZIP. To override:
 
 ```bash
 curl -X POST http://localhost:8000/v1/admin/skills \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "code-vuln-analysis",
-    "content_base64": "'$(gzip -c code-vuln-analysis-SKILL.md | base64 -w0)'"
-  }'
+  -F "skill_data=@my-skill.zip" \
+  -F "name=custom-skill-name"
 ```
 
 **Validation rules:**
-- Skill name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens (max 64 characters)
-- If frontmatter `name` is present, it must match the API request name
-- Frontmatter must include `description` (either in file or via request field)
+- Skill name must start with a letter and contain only letters, digits, and hyphens
+- ZIP must contain `SKILL.md` at the skill root level
+- Only allowed subdirectories: `scripts/`, `references/`, `assets/`
+- Frontmatter must include `description`
 - Body (instructions) cannot be empty
-- Maximum file size: 500 KB
-- Boolean fields (`user-invocable`, `disable-model-invocation`) must be actual booleans
-- `context` must be `"fork"` if present
+- Maximum ZIP size: 15 MB (compressed), 50 MB (extracted)
+- Maximum files per archive: 100
+- Maximum individual file size: 5 MB
+- Maximum nesting depth: 5 levels
+- No symlinks, no path traversal, no hidden files
 
 ---
 
@@ -174,6 +212,8 @@ curl http://localhost:8000/v1/admin/skills \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
+Response includes `file_count` for each skill.
+
 ---
 
 ## Show Skill Details
@@ -183,29 +223,21 @@ curl http://localhost:8000/v1/admin/skills/code-vuln-analysis \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-Returns skill metadata, parsed frontmatter, and a body preview.
+Returns skill metadata, parsed frontmatter, body preview, and a `file_listing` of all files in the skill directory.
 
 ---
 
 ## Update a Skill
 
-Replace the entire SKILL.md or update just the description:
+Upload a new ZIP to fully replace the skill directory:
 
 ```bash
-# Replace content
 curl -X PUT http://localhost:8000/v1/admin/skills/code-vuln-analysis \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "content_base64": "'$(base64 -w0 code-vuln-analysis-v2-SKILL.md)'"
-  }'
-
-# Update description only
-curl -X PUT http://localhost:8000/v1/admin/skills/code-vuln-analysis \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"description": "V2: OWASP Top 10 + CWE coverage"}'
+  -F "skill_data=@code-vuln-analysis-v2.zip"
 ```
+
+This is a **full replacement** — the entire skill directory is swapped atomically. To change the description, update `SKILL.md` in the ZIP and re-upload.
 
 ---
 
@@ -228,22 +260,47 @@ Skills use two separate directory trees:
 /data/skills-plugin/                  ← Plugin directory (passed to Claude Code via --plugin-dir)
 ├── .claude-plugin/
 │   └── plugin.json                   ← Auto-generated manifest
-│                                       {"name": "cca-skills", "version": "1.0.0", ...}
+│                                       {"name": "ccas-plugin", "version": "1.0.0", ...}
+├── agents/                           ← Agent .md files synced from /data/agents/prompts/
+│   └── (agent-name.md)
 └── skills/
     ├── code-vuln-analysis/
-    │   └── SKILL.md                  ← Skill definition (frontmatter + body)
+    │   ├── SKILL.md                  ← Skill definition (frontmatter + body)
+    │   ├── scripts/
+    │   │   └── analyze.py
+    │   └── references/
+    │       └── owasp-guide.md
     └── unit-test-generator/
         └── SKILL.md
 
 /data/skills-meta/                    ← Management metadata (not visible to Claude Code)
-├── skills.json                       ← {name: {added_at, description, skill_size_bytes}}
+├── skills.json                       ← {"_metadata": {name: {added_at, description, skill_size_bytes, file_count}}}
 └── .lock                             ← File lock for concurrent access safety
 ```
 
-- **`skills-plugin/`** — The actual plugin directory. This is the only path Claude Code sees. Contains the manifest and skill subdirectories. Mounted read-only in the sandbox.
-- **`skills-meta/`** — Provenance metadata used by the admin API for listing and display. Stored separately to keep the plugin directory clean (Claude Code only expects `.claude-plugin/` and `skills/`).
-- **`plugin.json`** — Auto-generated on first skill addition. Fixed identity: name `cca-skills`, version `1.0.0`. Regenerated if missing.
+- **`skills-plugin/`** — The actual plugin directory. This is the only path Claude Code sees. Contains the manifest, skill subdirectories, and agent files. Mounted read-only in the sandbox.
+- **`skills-meta/`** — Provenance metadata used by the admin API for listing and display. Stored separately to keep the plugin directory clean.
+- **`plugin.json`** — Auto-generated on first skill addition. Fixed identity: name `ccas-plugin`, version `1.0.0`. Regenerated if missing.
 - **`.lock`** — File-based lock (`fcntl.flock`) preventing concurrent modifications from corrupting metadata.
+
+---
+
+## Security
+
+Skill ZIP archives undergo comprehensive security validation:
+
+| Check | Description |
+|-------|-------------|
+| **Size limits** | 15 MB compressed, 50 MB extracted, 5 MB per file, 100 files max |
+| **Format validation** | ZIP magic bytes + structure verification |
+| **Path traversal** | Multi-layer: `..` rejection, absolute path rejection, resolve() check |
+| **Symlink rejection** | All symlink entries are rejected via external_attr check |
+| **Zip bomb protection** | Declared sizes checked pre-extraction + actual bytes tracked during extraction |
+| **Filename allowlist** | Files: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, dirs: `[a-zA-Z0-9][a-zA-Z0-9_-]*` |
+| **Structure enforcement** | Only SKILL.md, scripts/, references/, assets/ at root level |
+| **Duplicate detection** | No two entries may resolve to the same path |
+| **Nesting depth** | Maximum 5 levels below skill root |
+| **Atomic deployment** | Skill directory fully written before becoming visible; rollback on failure |
 
 ---
 
@@ -260,12 +317,12 @@ Inside sandbox:   /data/skills-plugin/  (read-only bind mount)
                           │
                   Claude Code CLI reads plugin.json
                   Discovers skills/*/SKILL.md
-                  Registers as cca-skills:<name>
+                  Registers as ccas-plugin:<name>
 ```
 
 This means:
 
-- Claude Code **can read** the plugin manifest and all SKILL.md files
+- Claude Code **can read** the plugin manifest, all SKILL.md files, and all supporting files (scripts, references, assets)
 - Claude Code **cannot modify** skill files from inside the sandbox
 - The rest of `/data/` remains hidden behind a tmpfs overlay
 - If no skills exist, the plugin directory is not mounted (no overhead)

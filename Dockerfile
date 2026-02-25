@@ -6,9 +6,10 @@
 # =============================================================================
 ARG PYTHON_VERSION=3.14
 ARG NODE_MAJOR=20
-ARG CLAUDE_CODE_VERSION=2.1.39
+ARG CLAUDE_CODE_VERSION=2.1.56
 ARG GOSU_VERSION=1.19
-ARG SANDBOX_RUNTIME_VERSION=0.0.37
+ARG JQ_VERSION=1.8.1
+ARG SANDBOX_RUNTIME_VERSION=0.0.38
 
 # =============================================================================
 # Build stage
@@ -40,6 +41,7 @@ FROM python:${PYTHON_VERSION}-slim
 ARG NODE_MAJOR
 ARG CLAUDE_CODE_VERSION
 ARG GOSU_VERSION
+ARG JQ_VERSION
 ARG SANDBOX_RUNTIME_VERSION
 
 # Install runtime system dependencies:
@@ -53,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     bubblewrap \
     socat \
+    tini \
     && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
@@ -65,6 +68,17 @@ RUN arch="$(dpkg --print-architecture)" \
     && curl -fsSL "https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${arch}" -o /usr/local/bin/gosu \
     && chmod +x /usr/local/bin/gosu \
     && gosu --version
+
+# Install jq for JSON processing
+RUN arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) jq_arch="linux-amd64" ;; \
+        arm64) jq_arch="linux-arm64" ;; \
+        *) echo "Unsupported architecture: ${arch}" && exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-${jq_arch}" -o /usr/local/bin/jq \
+    && chmod +x /usr/local/bin/jq \
+    && jq --version
 
 # Install Claude Code CLI globally (required by the Agent SDK at runtime)
 # Install sandbox-runtime for seccomp BPF binaries (apply-seccomp + unix-block.bpf)
@@ -114,5 +128,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/v1/health || exit 1
 
 # Entry point — runs as root to fix volume permissions, then drops to appuser
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["tini", "-s", "--", "/entrypoint.sh"]
 CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

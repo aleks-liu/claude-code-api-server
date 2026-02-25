@@ -38,8 +38,10 @@ Filesystem layout inside the sandbox::
 When the security profile has network restrictions (non-unconfined),
 the sandbox adds ``--unshare-net`` for full network namespace isolation
 and bind-mounts a proxy Unix socket into the sandbox.  An inner wrapper
-script (``sandbox_inner.sh``) runs socat to bridge the socket to TCP
-``127.0.0.1:3128`` and sets ``HTTP_PROXY``/``HTTPS_PROXY`` env vars.
+script (``sandbox_inner.sh``) is written to the job directory and
+bind-mounted read-only at ``/tmp/sandbox_inner.sh`` inside the sandbox.
+It runs socat to bridge the socket to TCP ``127.0.0.1:3128`` and sets
+``HTTP_PROXY``/``HTTPS_PROXY`` env vars.
 
 For the ``unconfined`` profile, the wrapper is generated WITHOUT
 ``--unshare-net`` and without the inner wrapper (current behavior).
@@ -95,6 +97,9 @@ INNER_SCRIPT_NAME = "sandbox_inner.sh"
 
 # Path where the proxy socket is mounted inside the sandbox.
 _SANDBOX_PROXY_SOCKET = "/tmp/proxy.sock"
+
+# Path where the inner wrapper script is mounted inside the sandbox.
+_SANDBOX_INNER_SCRIPT = "/tmp/sandbox_inner.sh"
 
 # TCP port that socat listens on inside the sandbox.
 _SANDBOX_PROXY_PORT = 3128
@@ -628,7 +633,9 @@ def _generate_inner_script(
         exec_line = f"exec {shlex.quote(real_cli_path)} \"$@\""
         seccomp_comment = (
             "# WARNING: Running without seccomp BPF filter (degraded security).\n"
-            "# Direct socket creation is not blocked — proxy bypass is theoretically possible.\n"
+            "# AF_UNIX socket creation is not blocked — the process can connect to\n"
+            "# host-side Unix sockets (Docker, dbus, etc.) exposed via --ro-bind.\n"
+            "# TCP/UDP is still isolated by --unshare-net.\n"
             "# Install vendored seccomp binaries for full protection.\n"
             "# Execute Claude CLI"
         )
@@ -804,22 +811,21 @@ def create_sandbox_wrapper(
                 stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
             )
 
-            # The inner script must be accessible inside the sandbox.
-            # It lives in job_dir which is under data_dir (hidden by tmpfs).
-            # We need to bind-mount it. Use input_dir since it's writable.
-            # Actually, job_dir itself is not mounted — only input_dir is.
-            # So we place the inner script in input_dir for visibility.
-            inner_in_input = input_dir_resolved / INNER_SCRIPT_NAME
-            inner_in_input.write_text(inner_content, encoding="utf-8")
-            inner_in_input.chmod(
-                stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
-            )
-            inner_script_sandbox_path = str(inner_in_input)
+            # Expose the inner script inside the sandbox via read-only
+            # bind mount.  The host-side file (in job_dir) is mapped to
+            # a fixed path in /tmp — the same pattern used for proxy.sock.
+            # This keeps infrastructure files out of the job working
+            # directory and makes the script immutable inside the sandbox.
+            bwrap_args.extend([
+                "--ro-bind", str(inner_path), _SANDBOX_INNER_SCRIPT,
+            ])
+            inner_script_sandbox_path = _SANDBOX_INNER_SCRIPT
 
             logger.debug(
                 "inner_wrapper_created",
                 job_id=job_id,
-                inner_path=str(inner_in_input),
+                host_path=str(inner_path),
+                sandbox_path=_SANDBOX_INNER_SCRIPT,
             )
         except OSError as exc:
             raise SandboxCreationError(

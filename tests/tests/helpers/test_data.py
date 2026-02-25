@@ -53,6 +53,50 @@ def make_skill_content(name: str, description: str = "Test skill") -> str:
     )
 
 
+def make_skill_zip(
+    name: str,
+    description: str = "Test skill",
+    extra_files: dict[str, str | bytes] | None = None,
+    flat: bool = False,
+) -> bytes:
+    """
+    Create a valid skill ZIP archive.
+
+    Args:
+        name: Skill name (used as root dir name and in SKILL.md frontmatter).
+        description: Skill description for SKILL.md frontmatter.
+        extra_files: Additional files to include (paths relative to skill root).
+        flat: If True, put files at archive root (no wrapping directory).
+
+    Returns:
+        ZIP archive bytes.
+    """
+    skill_md = make_skill_content(name, description)
+
+    files: dict[str, str | bytes] = {}
+    prefix = "" if flat else f"{name}/"
+
+    files[f"{prefix}SKILL.md"] = skill_md
+
+    if extra_files:
+        for path, content in extra_files.items():
+            files[f"{prefix}{path}"] = content
+
+    return make_valid_zip(files)
+
+
+def make_skill_zip_with_scripts(name: str) -> bytes:
+    """Create a skill ZIP with scripts/ and references/ subdirs."""
+    return make_skill_zip(
+        name=name,
+        extra_files={
+            "scripts/analyze.py": "#!/usr/bin/env python3\nprint('analyzing')\n",
+            "scripts/validate.sh": "#!/bin/bash\necho 'validating'\n",
+            "references/guide.md": "# Guide\n\nSome reference documentation.\n",
+        },
+    )
+
+
 def random_suffix(length: int = 6) -> str:
     """Generate a random alphanumeric suffix for unique test resource names."""
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=length))

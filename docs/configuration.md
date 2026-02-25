@@ -17,7 +17,7 @@ All configuration is via environment variables with `CCAS_` prefix.
 |----------|---------|-------------|
 | `CCAS_HOST` | `0.0.0.0` | Host to bind server |
 | `CCAS_PORT` | `8000` | Port to bind server |
-| `CCAS_DEBUG` | `false` | Enable debug mode (verbose logging) |
+| `CCAS_DEBUG` | `false` | Enable debug mode (verbose logging, human-readable format) |
 | `CCAS_LOG_LEVEL` | `INFO` | Log level: DEBUG, INFO, WARNING, ERROR |
 | `CCAS_DATA_DIR` | `/data` | Base directory for all data |
 | `CCAS_MAX_UPLOAD_SIZE_MB` | `50` | Maximum upload size in MB |
@@ -25,10 +25,10 @@ All configuration is via environment variables with `CCAS_` prefix.
 | `CCAS_MAX_FILES_PER_ARCHIVE` | `10000` | Max files in archive |
 | `CCAS_MAX_CONCURRENT_JOBS` | `5` | Max simultaneous jobs |
 | `CCAS_MAX_PENDING_JOBS` | `50` | Max queued jobs. New submissions rejected with HTTP 429 when reached |
-| `CCAS_DEFAULT_MODEL` | `claude-sonnet-4-5` | Default Claude model when client does not specify one. Overridden per-job via the `model` field |
+| `CCAS_DEFAULT_MODEL` | `claude-sonnet-4-6` | Default Claude model when client does not specify one. Overridden per-job via the `model` field |
 | `CCAS_RATE_LIMIT_RPM` | `100` | Rate limit in requests per minute. Set to `0` to disable |
 | `CCAS_MAX_REQUEST_BODY_MB` | `10` | Max HTTP request body size in MB (non-upload endpoints). Uploads have their own limit |
-| `CCAS_SETTING_SOURCES` | *(empty)* | Comma-separated Claude Code setting sources (e.g. `user`, `project`). Empty disables all |
+| `CCAS_SETTING_SOURCES` | *(empty)* | Comma-separated Claude Code setting sources (e.g. `user`, `project`, `local`). Empty string disables all. Set to `none` to omit the `--setting-sources` flag entirely |
 | `CCAS_DEFAULT_JOB_TIMEOUT` | `1800` | Default timeout (30 min) |
 | `CCAS_MAX_JOB_TIMEOUT` | `7200` | Maximum timeout (2 hours) |
 | `CCAS_MIN_JOB_TIMEOUT` | `60` | Minimum timeout (1 min) |

@@ -108,19 +108,24 @@ Content-Type: application/json
 **Body:**
 ```json
 {
-  "upload_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "upload_ids": [
+    "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  ],
   "prompt": "Analyze this Python codebase for SQL injection vulnerabilities. Write detailed findings to a file called vulnerabilities.json",
   "claude_md": "Focus on database query patterns. Use security best practices.",
+  "agent": "vuln-scanner",
   "timeout_seconds": 1800
 }
 ```
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `upload_id` | No | ID from previous upload (omit for prompt-only jobs) |
+| `upload_ids` | No | List of upload IDs to combine in the working directory (max 5). Order matters: later uploads overwrite earlier ones on file-path conflicts. Omit or pass `[]` for prompt-only jobs. |
 | `prompt` | Yes | Task description for Claude |
 | `claude_md` | No | Additional CLAUDE.md instructions |
 | `model` | No | Claude model to use (default: server's `CCAS_DEFAULT_MODEL`) |
+| `agent` | No | Name of a pre-configured agent (added via Admin API). When set, the job runs with the agent's system prompt instead of the default. Must match `^[a-z][a-z0-9-]*$`, max 64 chars. |
 | `timeout_seconds` | No | Job timeout (default: 1800) |
 
 **Response (202 Accepted):**
@@ -136,9 +141,11 @@ Content-Type: application/json
 | Status | Error Code | Description |
 |--------|------------|-------------|
 | 400 | `UPLOAD_ERROR` | Upload not found or expired |
+| 400 | `JOB_ERROR` | Agent not found (use Admin API to add agents first) |
 | 400 | - | Invalid request body |
 | 400 | - | Missing `X-Anthropic-Key` header |
 | 401 | - | Invalid server API key |
+| 422 | - | More than 5 upload IDs, duplicate IDs, invalid UUID format, or invalid agent name |
 
 ---
 
@@ -157,17 +164,19 @@ Authorization: Bearer <server_api_key>
   "job_id": "job_a1b2c3d4e5f6",
   "status": "RUNNING",
   "model": "claude-sonnet-4-5",
+  "agent": null,
   "created_at": "2025-01-25T10:30:00Z",
   "started_at": "2025-01-25T10:30:01Z"
 }
 ```
 
-**Response — COMPLETED:**
+**Response — COMPLETED (with agent):**
 ```json
 {
   "job_id": "job_a1b2c3d4e5f6",
   "status": "COMPLETED",
   "model": "claude-sonnet-4-5",
+  "agent": "vuln-scanner",
   "created_at": "2025-01-25T10:30:00Z",
   "started_at": "2025-01-25T10:30:01Z",
   "completed_at": "2025-01-25T10:35:42Z",

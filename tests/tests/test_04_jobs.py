@@ -23,7 +23,7 @@ def test_create_job_with_upload(api, test_client):
     upload_id = upload_resp.json()["upload_id"]
 
     resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
-        "upload_id": upload_id,
+        "upload_ids": [upload_id],
         "prompt": "Analyze this code",
     })
     assert resp.status_code == 202
@@ -41,6 +41,39 @@ def test_create_job_without_upload(api, test_client):
     assert resp.status_code == 202
 
 
+def test_create_job_with_empty_upload_ids(api, test_client):
+    _, _, headers = test_client
+    resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
+        "upload_ids": [],
+        "prompt": "Prompt-only job with explicit empty list",
+    })
+    assert resp.status_code == 202
+
+
+def test_create_job_with_multiple_uploads(api, test_client):
+    _, _, headers = test_client
+
+    # Upload 1: source code
+    zip1 = make_valid_zip({"src/app.py": "print('hello')"})
+    resp1 = api.post("/v1/uploads", headers=headers,
+                     files={"file": ("code.zip", zip1, "application/zip")})
+    assert resp1.status_code == 201
+    upload_id_1 = resp1.json()["upload_id"]
+
+    # Upload 2: report
+    zip2 = make_valid_zip({"report.json": '{"findings": []}'})
+    resp2 = api.post("/v1/uploads", headers=headers,
+                     files={"file": ("report.zip", zip2, "application/zip")})
+    assert resp2.status_code == 201
+    upload_id_2 = resp2.json()["upload_id"]
+
+    resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
+        "upload_ids": [upload_id_1, upload_id_2],
+        "prompt": "Analyze code with report context",
+    })
+    assert resp.status_code == 202
+
+
 def test_create_job_with_all_optional_fields(api, test_client):
     _, _, headers = test_client
     zip_bytes = make_valid_zip()
@@ -49,7 +82,7 @@ def test_create_job_with_all_optional_fields(api, test_client):
     upload_id = upload_resp.json()["upload_id"]
 
     resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
-        "upload_id": upload_id,
+        "upload_ids": [upload_id],
         "prompt": "Analyze this code",
         "claude_md": "You are a security auditor.",
         "timeout_seconds": 120,
@@ -61,7 +94,7 @@ def test_create_job_with_all_optional_fields(api, test_client):
 def test_create_job_missing_prompt_returns_422(api, test_client):
     _, _, headers = test_client
     resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
-        "upload_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "upload_ids": ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
     })
     assert resp.status_code == 422
 
@@ -109,7 +142,7 @@ def test_create_job_short_anthropic_key_returns_400(api, test_client):
 def test_create_job_invalid_upload_id_format_returns_422(api, test_client):
     _, _, headers = test_client
     resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
-        "upload_id": "not-a-uuid",
+        "upload_ids": ["not-a-uuid"],
         "prompt": "test",
     })
     assert resp.status_code == 422
@@ -118,7 +151,7 @@ def test_create_job_invalid_upload_id_format_returns_422(api, test_client):
 def test_create_job_nonexistent_upload_returns_400(api, test_client):
     _, _, headers = test_client
     resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
-        "upload_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        "upload_ids": ["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
         "prompt": "test",
     })
     assert resp.status_code == 400
@@ -148,6 +181,29 @@ def test_create_job_timeout_above_max_returns_422(api, test_client):
     resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
         "prompt": "test",
         "timeout_seconds": 99999,
+    })
+    assert resp.status_code == 422
+
+
+def test_create_job_too_many_uploads_returns_422(api, test_client):
+    _, _, headers = test_client
+    # 6 UUIDs exceeds the MAX_UPLOADS_PER_JOB=5 limit
+    six_uuids = [
+        f"f47ac10b-58cc-4372-a567-0e02b2c3d47{i}" for i in range(6)
+    ]
+    resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
+        "upload_ids": six_uuids,
+        "prompt": "test",
+    })
+    assert resp.status_code == 422
+
+
+def test_create_job_duplicate_upload_ids_returns_422(api, test_client):
+    _, _, headers = test_client
+    dup_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    resp = api.post("/v1/jobs", headers=_job_headers(headers), json={
+        "upload_ids": [dup_id, dup_id],
+        "prompt": "test",
     })
     assert resp.status_code == 422
 

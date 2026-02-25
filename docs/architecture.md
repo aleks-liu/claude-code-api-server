@@ -10,6 +10,7 @@
 - [Data Flow](#data-flow)
 - [Directory Structure](#directory-structure)
 - [Features](#features)
+- [Container Process Model (tini)](#container-process-model-tini)
 - [Limitations](#limitations)
 
 ---
@@ -83,12 +84,12 @@ The **Claude Code API Server** wraps the official [Claude Agent SDK](https://pla
 claude_code_api_server/
 ├── src/
 │   ├── main.py              # FastAPI application and routes
-│   ├── admin_router.py      # Admin API endpoints (clients, MCP, agents, skills)
+│   ├── admin_router.py      # Admin API endpoints (clients, security profiles, MCP, agents, skills)
 │   ├── config.py            # Configuration management (Pydantic Settings)
 │   ├── models.py            # Request/response data models
 │   ├── auth.py              # API key authentication (Argon2 hashing)
 │   ├── crypto.py            # RSA encryption for admin bootstrap
-│   ├── security.py          # Directory isolation & tool permissions
+│   ├── security.py          # Tool permission callback (denied tools & MCP scoping)
 │   ├── sandbox.py           # Process-level bwrap sandbox (primary isolation)
 │   ├── sandbox_seccomp.py   # seccomp BPF detection and configuration
 │   ├── sandbox_proxy.py     # Per-job HTTP proxy for network isolation
@@ -101,8 +102,10 @@ claude_code_api_server/
 │   ├── mcp_loader.py        # MCP runtime loading, env expansion, health checks
 │   ├── agent_manager.py     # Subagent definition CRUD and SDK loading
 │   ├── skill_manager.py     # Skill definition CRUD and plugin manifest management
+│   ├── skill_zip_handler.py # Skill ZIP validation, extraction, and security
 │   ├── cleanup.py           # Background cleanup tasks
-│   └── logging_config.py    # Structured logging (structlog)
+│   ├── logging_config.py    # Structured logging (structlog)
+│   └── server_preamble.md   # System prompt injected into every job
 ├── create_admin.py          # CLI script for creating the first admin
 ├── Dockerfile               # Container image
 ├── docker-compose.yml       # Docker Compose deployment
@@ -118,16 +121,16 @@ claude_code_api_server/
    └─► POST /v1/uploads
        └─► Server generates UUID, validates ZIP, stores temporarily
 
-2. CLIENT creates job with upload reference
+2. CLIENT creates job with upload reference(s)
    └─► POST /v1/jobs
-       └─► Server extracts archive to job directory (single root dir stripped)
+       └─► Server extracts archive(s) to job directory (single root dir stripped)
        └─► Deletes original archive
        └─► Spawns background task for Claude execution
 
 3. BACKGROUND: Claude Agent executes
    └─► Server snapshots all files in input/ (SHA-256 hashes)
    └─► Claude reads/writes files in input/ directory (its cwd)
-   └─► Security callback validates ALL file access
+   └─► Security callback validates tool usage (denied tools & MCP scoping)
    └─► Server compares post-execution files against snapshot
    └─► New and modified files are copied to output/
 
@@ -192,7 +195,7 @@ claude_code_api_server/
 | Feature | Description |
 |---------|-------------|
 | **Async Job Execution** | Jobs run in background, clients poll for results |
-| **ZIP Archive Upload** | Upload codebases as ZIP files (max 50MB) |
+| **ZIP Archive Upload** | Upload codebases as ZIP files (configurable size limit) |
 | **Per-Job Anthropic Keys** | Each client provides their own Claude API key |
 | **CLAUDE.md Support** | Custom agent instructions per job |
 | **Configurable Timeouts** | Jobs timeout after configurable duration (default 30 min) |
@@ -220,6 +223,63 @@ claude_code_api_server/
 | **Fail-Closed by Default** | Jobs are refused if the bwrap sandbox cannot be created |
 
 For detailed security documentation, see [Security](security-model.md).
+
+---
+
+## Container Process Model (tini)
+
+The container uses [tini](https://github.com/krallin/tini) as PID 1:
+
+```
+tini (PID 1)  ← reaps orphaned children
+└── entrypoint.sh → exec gosu appuser
+    └── uvicorn (Python, the API server)
+        └── bwrap (per job, sandboxed)
+            └── bwrap (namespace setup, forks internally)
+                └── claude CLI
+```
+
+### Why tini is needed
+
+bwrap forks internally for Linux namespace setup, creating grandchild processes. When these exit, the kernel re-parents them to PID 1. If PID 1 is uvicorn (Python), it never calls `waitpid()` for these orphans, and they accumulate as zombies — 2 per completed job.
+
+`tini` is a minimal init (~20KB, ~200 lines of C) that does exactly two things: reaps zombie children and forwards signals. It does not interfere with Python's own subprocess management because only true orphans (grandchildren whose parent already exited) bubble up to PID 1.
+
+### Why not a Python-based solution
+
+| Approach | Problem |
+|---|---|
+| Background `waitpid(-1)` task | Races with asyncio's child watcher — can steal exit status from `Popen.wait()`, causing `ECHILD` errors during concurrent jobs |
+| `signal(SIGCHLD, SIG_IGN)` | Breaks `subprocess.Popen.wait()` and asyncio subprocess management used by the SDK |
+
+### Reliability
+
+- **Built into Docker**: `docker run --init` and compose `init: true` use tini under the hood (bundled since Docker 1.13).
+- **Industry standard**: Used by AWS ECS, Google Cloud Run, and official images (Jupyter, Jenkins).
+- **Battle-tested**: Created in 2015, ~5,500 GitHub stars, single-purpose with minimal attack surface.
+
+### Deployment coverage
+
+| Environment | How tini activates |
+|---|---|
+| `docker compose up` | Dockerfile `ENTRYPOINT ["tini", "-s", "--", ...]` + compose `init: true` (belt-and-suspenders; `-s` registers tini as a child subreaper so it works even when Docker's own tini is PID 1) |
+| `docker run` | Dockerfile ENTRYPOINT — tini is baked into the image |
+| **Kubernetes** | Dockerfile ENTRYPOINT — works without any pod-level config. K8s has no `init: true` equivalent; `shareProcessNamespace` exists but is unrelated and unnecessary |
+| Any OCI runtime | Dockerfile ENTRYPOINT — self-contained, no host dependencies |
+
+### Verification
+
+```bash
+# Confirm tini is PID 1
+docker exec claude-code-api ps -p 1 -o comm=
+# Expected: tini
+
+# After a job completes, check for zombies
+docker exec claude-code-api ps aux | grep defunct
+# Expected: no output
+```
+
+See [Bug Report: Zombie bwrap Processes](bugs/zombie-bwrap-processes.md) for the full investigation.
 
 ---
 

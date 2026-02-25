@@ -4,13 +4,133 @@
 
 ## Table of Contents
 
-- [Complete Workflow with cURL](#complete-workflow-with-curl)
-- [Python Client Example](#python-client-example)
+- [CLI Tools](#cli-tools)
+  - [Why CLI Tools?](#why-cli-tools)
+  - [Environment Variables](#environment-variables)
+  - [ccas-client (cli/client.py) — Job Submission](#ccas-client-cliclientpy--job-submission)
+  - [ccas-manager (cli/manage.py) — Server Administration](#ccas-manager-climanagepy--server-administration)
+  - [Key Capabilities](#key-capabilities)
+- [Raw API (cURL)](#raw-api-curl)
 - [n8n Webhook Integration](#n8n-webhook-integration)
 
 ---
 
-## Complete Workflow with cURL
+## CLI Tools
+
+### Why CLI Tools?
+
+CCAS ships two CLI tools that replace raw curl commands and custom scripts. They handle ZIP archive creation, file uploads, job polling, and output extraction automatically — so you can focus on the prompt, not the plumbing.
+
+### Environment Variables
+
+| Variable | Used by | Description |
+|----------|---------|-------------|
+| `CCAS_URL` | Both | Server URL (e.g., `http://localhost:8000`) |
+| `CCAS_CLIENT_API_KEY` | `cli/client.py` | Client API key for job submission |
+| `ANTHROPIC_API_KEY` | `cli/client.py` | Your Anthropic API key |
+| `CCAS_ADMIN_API_KEY` | `cli/manage.py` | Admin API key for server management |
+
+Keys can also be passed via CLI flags (`--key`, `--anthropic-key`) or prompted interactively when missing.
+
+---
+
+### ccas-client (cli/client.py) — Job Submission
+
+Three commands: **`run`**, **`fetch`**, **`status`**. Run `python cli/client.py --help` for full options.
+
+#### Real-world example: security review of a project directory
+
+```bash
+export CCAS_URL=http://localhost:8000
+export CCAS_CLIENT_API_KEY=ccas_your_client_key
+export ANTHROPIC_API_KEY=sk-ant-your_key
+
+python cli/client.py run \
+  --files ./my-project \
+  "Perform security review. Search for SQL injection vulnerabilities."
+```
+
+This auto-zips `./my-project` (excluding `node_modules/`, `.venv/`, `__pycache__/`, etc.), uploads the archive, creates a job, polls for completion with a progress spinner, and saves output files to a `<job_id>/` directory.
+
+#### Additional examples
+
+**Submit without waiting** — useful for long-running jobs:
+
+```bash
+# Submit and get job ID immediately
+python cli/client.py run --no-wait --files ./src "Analyze this codebase"
+# Job ID: job_abc123
+
+# Check on it later
+python cli/client.py status job_abc123
+
+# Fetch results when done
+python cli/client.py fetch job_abc123
+```
+
+**Read prompt from a file** — for complex, multi-paragraph prompts:
+
+```bash
+python cli/client.py run --prompt-file review-instructions.md --files ./src
+```
+
+**JSON output for CI pipelines** — machine-readable, no colors:
+
+```bash
+python cli/client.py run --json --no-color --files ./src "Run security scan" \
+  | jq '.status'
+```
+
+---
+
+### ccas-manager (cli/manage.py) — Server Administration
+
+Command groups: **status**, **config**, **skill**, **agent**, **mcp**, **client**, **profile**, **sync**. Run `python cli/manage.py --help` for the full list. Run `config init` first for persistent configuration.
+
+#### Quick examples
+
+```bash
+# Server health
+python cli/manage.py status
+
+# Create a client API key
+python cli/manage.py client add ci-pipeline --description "CI/CD pipeline"
+
+# List skills on the server
+python cli/manage.py skill list
+
+# Check sync status between local and remote
+python cli/manage.py sync status
+
+# Push a local skill to the server
+python cli/manage.py sync push skill my-skill
+
+# Add an MCP server from local config
+python cli/manage.py mcp add --sync-local my-mcp-server
+
+# Install an MCP package from npm
+python cli/manage.py mcp install @anthropic/some-mcp-server
+```
+
+Most modifying commands support `--dry-run` to preview changes and `--yes` to skip confirmations.
+
+---
+
+### Key Capabilities
+
+- **Auto-zipping** — directories are compressed automatically with smart excludes (`node_modules/`, `.venv/`, `__pycache__/`, etc.)
+- **Progress spinner** — visual feedback while waiting for job completion
+- **Output file extraction** — result files saved to a `<job_id>/` directory automatically
+- **JSON mode** — `--json` flag for machine-readable output, CI-friendly
+- **Interactive key prompts** — missing keys are prompted interactively (no need to export everything upfront)
+- **Sync engine** — push skills and agents from local `~/.claude/` to the server with conflict detection
+- **Dry-run support** — preview admin changes before applying
+
+---
+
+## Raw API (cURL)
+
+> **Recommended:** Use the [CLI tools](#cli-tools) above for a simpler experience. The curl workflow below is provided as a reference for cases where you need direct API access.
 
 ```bash
 # Configuration
@@ -36,8 +156,8 @@ JOB_RESPONSE=$(curl -s -X POST "$SERVER/v1/jobs" \
   -H "X-Anthropic-Key: $ANTHROPIC_KEY" \
   -H "Content-Type: application/json" \
   -d "{
-    \"upload_id\": \"$UPLOAD_ID\",
-    \"prompt\": \"Analyze this codebase for security vulnerabilities. Focus on: 1) SQL injection, 2) XSS, 3) Authentication issues. Write detailed findings to security_report.json\",
+    \"upload_ids\": [\"$UPLOAD_ID\"],
+    \"prompt\": \"Analyze this codebase for security vulnerabilities.\",
     \"timeout_seconds\": 1800
   }")
 
@@ -61,123 +181,7 @@ while true; do
 done
 
 # 5. Extract output file (if any)
-echo $STATUS_RESPONSE | jq -r '.output.files["security_report.json"]' | base64 -d > security_report.json
-```
-
----
-
-## Python Client Example
-
-```python
-import base64
-import json
-import time
-from pathlib import Path
-import httpx
-
-class ClaudeCodeClient:
-    def __init__(self, server_url: str, api_key: str, anthropic_key: str):
-        self.server_url = server_url.rstrip("/")
-        self.api_key = api_key
-        self.anthropic_key = anthropic_key
-        self.client = httpx.Client(timeout=60.0)
-
-    def _headers(self, include_anthropic: bool = False) -> dict:
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        if include_anthropic:
-            headers["X-Anthropic-Key"] = self.anthropic_key
-        return headers
-
-    def upload(self, zip_path: Path) -> str:
-        """Upload a ZIP archive and return upload_id."""
-        with open(zip_path, "rb") as f:
-            response = self.client.post(
-                f"{self.server_url}/v1/uploads",
-                headers=self._headers(),
-                files={"file": (zip_path.name, f, "application/zip")}
-            )
-        response.raise_for_status()
-        return response.json()["upload_id"]
-
-    def create_job(
-        self,
-        upload_id: str,
-        prompt: str,
-        claude_md: str = None,
-        timeout: int = 1800
-    ) -> str:
-        """Create a job and return job_id."""
-        response = self.client.post(
-            f"{self.server_url}/v1/jobs",
-            headers=self._headers(include_anthropic=True),
-            json={
-                "upload_id": upload_id,
-                "prompt": prompt,
-                "claude_md": claude_md,
-                "timeout_seconds": timeout
-            }
-        )
-        response.raise_for_status()
-        return response.json()["job_id"]
-
-    def get_job(self, job_id: str) -> dict:
-        """Get job status and results."""
-        response = self.client.get(
-            f"{self.server_url}/v1/jobs/{job_id}",
-            headers=self._headers()
-        )
-        response.raise_for_status()
-        return response.json()
-
-    def wait_for_completion(
-        self,
-        job_id: str,
-        poll_interval: int = 10,
-        max_wait: int = 3600
-    ) -> dict:
-        """Wait for job to complete and return results."""
-        start_time = time.time()
-
-        while time.time() - start_time < max_wait:
-            result = self.get_job(job_id)
-            status = result["status"]
-
-            if status in ("COMPLETED", "FAILED", "TIMEOUT"):
-                return result
-
-            time.sleep(poll_interval)
-
-        raise TimeoutError(f"Job {job_id} did not complete within {max_wait}s")
-
-    def analyze(self, zip_path: Path, prompt: str, **kwargs) -> dict:
-        """Convenience method: upload, create job, wait for result."""
-        upload_id = self.upload(zip_path)
-        job_id = self.create_job(upload_id, prompt, **kwargs)
-        return self.wait_for_completion(job_id)
-
-
-# Usage
-if __name__ == "__main__":
-    client = ClaudeCodeClient(
-        server_url="http://localhost:8000",
-        api_key="ccas_your_key_here",
-        anthropic_key="sk-ant-your_key_here"
-    )
-
-    result = client.analyze(
-        zip_path=Path("./project.zip"),
-        prompt="Find all SQL injection vulnerabilities"
-    )
-
-    print(f"Status: {result['status']}")
-    print(f"Cost: ${result.get('cost_usd', 0):.4f}")
-    print(f"Output: {result['output']['text'][:500]}...")
-
-    # Decode output files
-    for filename, content_b64 in result["output"]["files"].items():
-        content = base64.b64decode(content_b64)
-        print(f"\n{filename}:")
-        print(content.decode("utf-8")[:500])
+echo $STATUS_RESPONSE | jq -r '.output.files["report.json"]' | base64 -d > report.json
 ```
 
 ---
@@ -196,7 +200,7 @@ In n8n, create a workflow:
    - Method: POST
    - URL: `http://your-server:8000/v1/jobs`
    - Headers: Auth + `X-Anthropic-Key`
-   - Body: JSON with upload_id and prompt
+   - Body: JSON with upload_ids and prompt
 4. **Wait** node: 30 seconds
 5. **Loop**: Poll `/v1/jobs/{job_id}` until complete
 6. **Output**: Process results

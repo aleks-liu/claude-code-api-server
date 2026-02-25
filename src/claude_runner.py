@@ -286,6 +286,7 @@ class ClaudeRunner:
             "job_execution_starting",
             job_id=job_id,
             model=job_meta.model,
+            agent=job_meta.agent,
             timeout=job_meta.timeout_seconds,
         )
 
@@ -527,8 +528,9 @@ class ClaudeRunner:
                             job_id=job_id,
                             message=(
                                 "seccomp BPF hardening not available. "
-                                "Proxy bypass via direct socket creation "
-                                "is theoretically possible."
+                                "TCP/UDP isolated by --unshare-net, but "
+                                "AF_UNIX socket access to host services "
+                                "(Docker, dbus) is not blocked."
                             ),
                         )
 
@@ -789,6 +791,26 @@ class ClaudeRunner:
             "preset": "claude_code",
             "append": "\n\n".join(append_parts),
         }
+
+        # =================================================================
+        # Agent mode
+        # =================================================================
+        # When an agent is specified, pass --agent flag via extra_args.
+        # The CLI uses the agent's .md file as the base system prompt.
+        # The preset block above only emits --append-system-prompt (not
+        # --system-prompt), so it layers client instructions and server
+        # preamble on top of the agent's prompt without conflict.
+        if job_meta.agent is not None:
+            from .skill_manager import PLUGIN_NAME
+
+            qualified_agent = f"{PLUGIN_NAME}:{job_meta.agent}"
+            options.extra_args["agent"] = qualified_agent
+            logger.info(
+                "agent_mode_active",
+                job_id=job_id,
+                agent=job_meta.agent,
+                qualified_agent=qualified_agent,
+            )
 
         # =================================================================
         # Execute

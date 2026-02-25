@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .logging_config import get_logger
 from .models import (
+    MAX_NAME_LENGTH,
     NetworkPolicy,
     SecurityProfile,
     SecurityProfilesFile,
@@ -59,7 +60,7 @@ class ProfileDeleteError(ProfileError):
 # Validation
 # =============================================================================
 
-_PROFILE_NAME_RE = re.compile(r"^[a-z0-9-]+$")
+_PROFILE_NAME_RE = re.compile(r"^[a-zA-Z0-9-]+$")
 
 # Domain patterns: exact or *.suffix (suffix must have at least one dot)
 _DOMAIN_PATTERN_RE = re.compile(
@@ -104,14 +105,14 @@ def _validate_network_policy(network: NetworkPolicy) -> None:
 
 def _validate_profile_name(name: str) -> None:
     """Validate profile name format."""
-    if not name or len(name) > 100:
+    if not name or len(name) > MAX_NAME_LENGTH:
         raise ProfileValidationError(
-            "Profile name must be 1-100 characters"
+            f"Profile name must be 1-{MAX_NAME_LENGTH} characters"
         )
     if not _PROFILE_NAME_RE.match(name):
         raise ProfileValidationError(
             f"Profile name '{name}' is invalid. "
-            "Must contain only lowercase letters, digits, and hyphens."
+            "Must contain only letters, digits, and hyphens."
         )
 
 
@@ -311,6 +312,15 @@ class SecurityProfileManager:
 
         if name in self._data.profiles:
             raise ProfileExistsError(f"Profile '{name}' already exists")
+
+        # Case-insensitive uniqueness: prevent "MyProfile" when "myprofile" exists
+        name_lower = name.lower()
+        for existing in self._data.profiles:
+            if existing.lower() == name_lower and existing != name:
+                raise ProfileExistsError(
+                    f"Profile '{name}' conflicts with existing profile "
+                    f"'{existing}' (names differ only in case)."
+                )
 
         if network is not None:
             _validate_network_policy(network)

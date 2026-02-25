@@ -231,6 +231,23 @@ async def lifespan(app: FastAPI):
         )
     # ----------------------------------------------------------------------
 
+    # ---- Clean up orphaned skill temp directories -------------------------
+    try:
+        from .skill_zip_handler import cleanup_orphaned_temp_dirs
+
+        cleaned = cleanup_orphaned_temp_dirs(settings.skills_dir)
+        if cleaned:
+            logger.info(
+                "skills_startup_temp_cleanup",
+                cleaned_count=cleaned,
+            )
+    except Exception as e:
+        logger.warning(
+            "skills_startup_temp_cleanup_failed",
+            error=str(e),
+        )
+    # ----------------------------------------------------------------------
+
     # Initialize Claude runner with the validated MCP config
     get_claude_runner(settings=settings, mcp_config=mcp_config)
 
@@ -277,7 +294,7 @@ class RequestBodySizeLimitMiddleware:
             return
 
         path = scope.get("path", "")
-        if path in self.excluded_paths:
+        if any(path == ep or path.startswith(ep + "/") for ep in self.excluded_paths):
             await self.app(scope, receive, send)
             return
 
@@ -353,7 +370,7 @@ app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     RequestBodySizeLimitMiddleware,
     max_bytes=_settings.max_request_body_bytes,
-    excluded_paths={"/v1/uploads"},
+    excluded_paths={"/v1/uploads", "/v1/admin/skills"},
 )
 
 # API v1 router — all endpoints live under /v1/
@@ -602,14 +619,15 @@ async def create_job(
     with LogContext(client_id=client.client_id):
         job_manager = get_job_manager()
 
-        # Create job (extracts archive if upload was provided)
+        # Create job (extracts archives if uploads were provided)
         job_meta = await job_manager.create_job(
-            upload_id=request.upload_id,
+            upload_ids=request.upload_ids,
             prompt=request.prompt,
             client_id=client.client_id,
             claude_md=request.claude_md,
             timeout_seconds=request.timeout_seconds,
             model=request.model,
+            agent=request.agent,
         )
 
         # Schedule background execution

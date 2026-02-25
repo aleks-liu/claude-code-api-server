@@ -4,6 +4,7 @@ This module runs last. It requires ANTHROPIC_API_KEY to be set.
 """
 
 import base64
+import io
 import json
 import os
 import time
@@ -11,7 +12,7 @@ import time
 import pytest
 
 from helpers.api_client import ApiClient
-from helpers.test_data import make_agent_content, make_skill_content
+from helpers.test_data import make_agent_content, make_skill_zip
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 BASE_URL = os.environ.get("TEST_BASE_URL", "http://127.0.0.1:8080")
@@ -36,13 +37,11 @@ def ai_setup(api, admin_headers):
     # May already exist from a previous run — accept 201 or 409
     assert resp.status_code in (201, 409)
 
-    # Create test skill
+    # Create test skill (ZIP-based upload)
     skill_name = "test-skill-diag"
-    skill_content = make_skill_content(skill_name, description="Diagnostic test skill")
-    resp = api.post("/v1/admin/skills", headers=admin_headers, json={
-        "name": skill_name,
-        "content": skill_content,
-    })
+    zip_bytes = make_skill_zip(skill_name, description="Diagnostic test skill")
+    resp = api.post("/v1/admin/skills", headers=admin_headers,
+                    files={"skill_data": ("skill.zip", io.BytesIO(zip_bytes), "application/zip")})
     assert resp.status_code in (201, 409)
 
     # Collect expected MCP servers
@@ -160,7 +159,7 @@ def test_claude_code_reports_capabilities(api, ai_setup, ai_client_headers, admi
     # Validate test agent is visible (may be namespaced via plugin)
     agent_found = (
         "test-agent-diag" in capabilities["agents"]
-        or "cca-skills:test-agent-diag" in capabilities["agents"]
+        or "ccas-plugin:test-agent-diag" in capabilities["agents"]
     )
     assert agent_found, (
         f"Test agent not found. Reported agents: {capabilities['agents']}"
@@ -169,7 +168,7 @@ def test_claude_code_reports_capabilities(api, ai_setup, ai_client_headers, admi
     # Validate test skill is visible (may be namespaced)
     skill_found = (
         "test-skill-diag" in capabilities["skills"]
-        or "cca-skills:test-skill-diag" in capabilities["skills"]
+        or "ccas-plugin:test-skill-diag" in capabilities["skills"]
     )
     assert skill_found, (
         f"Test skill not found. Reported skills: {capabilities['skills']}"

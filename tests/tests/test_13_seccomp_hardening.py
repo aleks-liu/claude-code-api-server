@@ -479,11 +479,14 @@ class TestSandboxWrapperSeccomp:
         except Exception:
             pytest.skip("bwrap not available in test environment")
 
-        inner_script = input_dir / INNER_SCRIPT_NAME
+        inner_script = job_dir / INNER_SCRIPT_NAME
         assert inner_script.exists()
         content = inner_script.read_text()
         assert "apply-seccomp" in content
         assert "unix-block.bpf" in content
+
+        # Inner script must NOT be in input_dir (FR-1)
+        assert not (input_dir / INNER_SCRIPT_NAME).exists()
 
     def test_wrapper_without_seccomp(self, tmp_path):
         from src.sandbox import create_sandbox_wrapper, INNER_SCRIPT_NAME
@@ -514,11 +517,14 @@ class TestSandboxWrapperSeccomp:
         except Exception:
             pytest.skip("bwrap not available in test environment")
 
-        inner_script = input_dir / INNER_SCRIPT_NAME
+        inner_script = job_dir / INNER_SCRIPT_NAME
         assert inner_script.exists()
         content = inner_script.read_text()
         assert "apply-seccomp" not in content
         assert "WARNING: Running without seccomp" in content
+
+        # Inner script must NOT be in input_dir (FR-1)
+        assert not (input_dir / INNER_SCRIPT_NAME).exists()
 
     def test_unconfined_no_inner_script(self, tmp_path):
         from src.sandbox import create_sandbox_wrapper, INNER_SCRIPT_NAME
@@ -545,8 +551,8 @@ class TestSandboxWrapperSeccomp:
         except Exception:
             pytest.skip("bwrap not available in test environment")
 
-        inner_script = input_dir / INNER_SCRIPT_NAME
-        assert not inner_script.exists()
+        assert not (job_dir / INNER_SCRIPT_NAME).exists()
+        assert not (input_dir / INNER_SCRIPT_NAME).exists()
 
 
 # =============================================================================

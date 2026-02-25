@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import __version__
 
@@ -48,20 +48,32 @@ class ClientRole(str, Enum):
 # =============================================================================
 
 
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+# Maximum length for entity names (agents, skills, profiles, MCP servers, clients).
+# Single source of truth — imported by managers and admin_router.
+MAX_NAME_LENGTH = 100
+
+MAX_UPLOADS_PER_JOB = 5
+
+
 class CreateJobRequest(BaseModel):
     """Request body for creating a new job."""
 
-    upload_id: str | None = Field(
-        default=None,
-        description="ID of a previously uploaded archive (optional — jobs can run without files)",
-        min_length=1,
-        pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-        examples=["f47ac10b-58cc-4372-a567-0e02b2c3d479"],
+    upload_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "IDs of previously uploaded archives to combine in the job's working directory. "
+            "Order matters: if archives contain files with the same path, later uploads overwrite earlier ones. "
+            f"Maximum {MAX_UPLOADS_PER_JOB} uploads per job. "
+            "Pass an empty list (or omit) for prompt-only jobs."
+        ),
+        max_length=MAX_UPLOADS_PER_JOB,
+        examples=[["f47ac10b-58cc-4372-a567-0e02b2c3d479"]],
     )
-    prompt: str = Field(
-        ...,
-        description="Task description for the Claude agent",
-        min_length=1,
+    prompt: str | None = Field(
+        default=None,
+        description="Task description for the Claude agent. Optional when 'agent' is specified.",
         max_length=100_000,
         examples=["Analyze all Python files for SQL injection vulnerabilities"],
     )
@@ -81,19 +93,45 @@ class CreateJobRequest(BaseModel):
         description=(
             "Claude model to use for this job. "
             "If not specified, the server default model is used "
-            "(configurable via CCAS_DEFAULT_MODEL, defaults to 'claude-sonnet-4-5'). "
-            "Examples: 'claude-sonnet-4-5', 'claude-opus-4-5'."
+            "(configurable via CCAS_DEFAULT_MODEL, defaults to 'claude-sonnet-4-6'). "
+            "Examples: 'claude-sonnet-4-6', 'claude-opus-4-6'."
         ),
-        examples=["claude-sonnet-4-5", "claude-opus-4-5"],
+        examples=["claude-sonnet-4-6", "claude-opus-4-6"],
+    )
+    agent: str | None = Field(
+        default=None,
+        description=(
+            "Name of a pre-configured agent to run this job as. "
+            "When specified, the agent's system prompt replaces the default "
+            "Claude Code prompt. The agent must exist (added via Admin API). "
+            "Omit for standard Claude Code behavior."
+        ),
+        max_length=MAX_NAME_LENGTH,
+        examples=["vuln-scanner", "code-reviewer"],
     )
 
-    @field_validator("prompt")
+    @field_validator("upload_ids")
     @classmethod
-    def validate_prompt_not_empty(cls, v: str) -> str:
-        """Ensure prompt is not just whitespace."""
-        if not v.strip():
-            raise ValueError("Prompt cannot be empty or whitespace only")
+    def validate_upload_ids(cls, v: list[str]) -> list[str]:
+        """Validate each upload ID is a UUID and there are no duplicates."""
+        for i, uid in enumerate(v):
+            if not _UUID_RE.match(uid):
+                raise ValueError(
+                    f"upload_ids[{i}]: '{uid}' is not a valid UUID"
+                )
+        if len(v) != len(set(v)):
+            raise ValueError("upload_ids contains duplicate entries")
         return v
+
+    @model_validator(mode="after")
+    def validate_prompt_or_agent(self) -> "CreateJobRequest":
+        """Ensure prompt is provided or auto-fill when agent is set."""
+        if self.prompt is not None and self.prompt.strip():
+            return self
+        if self.agent:
+            self.prompt = "Execute your task"
+            return self
+        raise ValueError("Prompt is required when no agent is specified")
 
     @field_validator("model")
     @classmethod
@@ -118,6 +156,24 @@ class CreateJobRequest(BaseModel):
             raise ValueError(
                 "Model must start with an alphanumeric character and contain "
                 "only alphanumeric characters, hyphens, dots, and underscores"
+            )
+        return v
+
+    @field_validator("agent")
+    @classmethod
+    def validate_agent_format(cls, v: str | None) -> str | None:
+        """Validate agent name format (must match AgentManager naming rules)."""
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None  # treat whitespace-only as "no agent"
+        if len(v) > MAX_NAME_LENGTH:
+            raise ValueError(f"Agent name too long ({len(v)} chars, max {MAX_NAME_LENGTH})")
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9-]*$", v):
+            raise ValueError(
+                "Agent name must start with a letter and contain "
+                "only letters, digits, and hyphens"
             )
         return v
 
@@ -196,6 +252,10 @@ class JobResponse(BaseModel):
     model: str | None = Field(
         default=None,
         description="Claude model used for this job",
+    )
+    agent: str | None = Field(
+        default=None,
+        description="Agent used for this job (null if default Claude Code)",
     )
     created_at: datetime = Field(
         ...,
@@ -310,11 +370,12 @@ class JobMeta(BaseModel):
     completed_at: datetime | None = None
 
     # Request data
-    upload_id: str | None = None
+    upload_ids: list[str] = Field(default_factory=list)
     prompt: str
     claude_md: str | None = None
     timeout_seconds: int
     model: str | None = None  # Claude model identifier (resolved from request or server default)
+    agent: str | None = None  # Agent name used for this job (None = default Claude Code)
 
     # Results (populated on completion)
     duration_ms: int | None = None
@@ -326,12 +387,23 @@ class JobMeta(BaseModel):
     num_turns: int | None = None
     exit_code: int | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_upload_id(cls, data: Any) -> Any:
+        """Migrate old status.json files that have 'upload_id' instead of 'upload_ids'."""
+        if isinstance(data, dict):
+            old = data.pop("upload_id", None)
+            if old is not None and "upload_ids" not in data:
+                data["upload_ids"] = [old]
+        return data
+
     def to_response(self, output: JobOutput | None = None) -> JobResponse:
         """Convert to API response model."""
         return JobResponse(
             job_id=self.job_id,
             status=self.status,
             model=self.model,
+            agent=self.agent,
             created_at=self.created_at,
             started_at=self.started_at,
             completed_at=self.completed_at,
@@ -620,7 +692,11 @@ class SkillEntry(BaseModel):
     )
     skill_size_bytes: int = Field(
         default=0,
-        description="Size of the SKILL.md file in bytes",
+        description="Total uncompressed size of the skill directory in bytes",
+    )
+    file_count: int = Field(
+        default=1,
+        description="Number of files in the skill directory",
     )
 
 
@@ -632,7 +708,7 @@ class SkillEntry(BaseModel):
 class CreateClientRequest(BaseModel):
     """Request body for creating a new client via admin API."""
 
-    client_id: str = Field(..., min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')
+    client_id: str = Field(..., min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')
     description: str = Field(default="", max_length=1000)
     role: ClientRole = ClientRole.CLIENT
     security_profile: str = Field(
@@ -676,7 +752,7 @@ class UpdateClientRequest(BaseModel):
 class CreateProfileRequest(BaseModel):
     """Request body for creating a security profile."""
 
-    name: str = Field(..., min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')
+    name: str = Field(..., min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')
     description: str = Field(default="", max_length=1000)
     network: NetworkPolicy = Field(default_factory=NetworkPolicy)
     denied_tools: list[str] = Field(default_factory=list)
@@ -714,7 +790,7 @@ class ProfileResponse(BaseModel):
 class AddMcpServerRequest(BaseModel):
     """Request body for manually adding an MCP server."""
 
-    name: str = Field(..., min_length=1, max_length=100, pattern=r'^[a-zA-Z0-9_-]+$')
+    name: str = Field(..., min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9_-]+$')
     type: Literal["stdio", "http", "sse"] = "stdio"
     command: str | None = Field(
         default=None,
@@ -783,7 +859,7 @@ class InstallMcpServerRequest(BaseModel):
     name: str | None = Field(
         default=None,
         min_length=1,
-        max_length=100,
+        max_length=MAX_NAME_LENGTH,
         pattern=r'^[a-zA-Z0-9_-]+$',
     )
     description: str = Field(default="", max_length=1000)
@@ -812,7 +888,7 @@ class McpHealthCheckResponse(BaseModel):
 class AddAgentRequest(BaseModel):
     """Request body for adding a subagent."""
 
-    name: str = Field(..., min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')
+    name: str = Field(..., min_length=1, max_length=MAX_NAME_LENGTH, pattern=r'^[a-zA-Z0-9-]+$')
     content: str | None = None
     content_base64: str | None = None
     description: str = Field(default="", max_length=1000)
@@ -842,29 +918,13 @@ class AgentDetailResponse(AgentResponse):
     body_preview: str
 
 
-class AddSkillRequest(BaseModel):
-    """Request body for adding a skill."""
-
-    name: str = Field(..., min_length=1, max_length=100, pattern=r'^[a-z0-9-]+$')
-    content: str | None = None
-    content_base64: str | None = None
-    description: str = Field(default="", max_length=1000)
-
-
-class UpdateSkillRequest(BaseModel):
-    """Request body for updating a skill."""
-
-    content: str | None = None
-    content_base64: str | None = None
-    description: str | None = Field(default=None, max_length=1000)
-
-
 class SkillResponse(BaseModel):
     """Response model for skill info."""
 
     name: str
     description: str
     skill_size_bytes: int
+    file_count: int
     added_at: datetime
 
 
@@ -873,3 +933,4 @@ class SkillDetailResponse(SkillResponse):
 
     frontmatter: dict | None
     body_preview: str
+    file_listing: list[str]

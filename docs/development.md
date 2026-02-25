@@ -14,8 +14,8 @@
 
 ```bash
 # Clone repository
-git clone https://github.com/aleks-liu/claude_code_api_server.git
-cd claude_code_api_server
+git clone https://github.com/aleks-liu/claude-code-server.git
+cd claude-code-server
 
 # Create virtual environment
 python -m venv .venv
@@ -24,8 +24,8 @@ source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Install dev dependencies
-pip install pytest pytest-asyncio httpx
+# Install test dependencies
+pip install -r tests/requirements.txt
 
 # Run in development mode
 export CCAS_DEBUG=true
@@ -37,13 +37,23 @@ python -m uvicorn src.main:app --reload
 
 ## Running Tests
 
-```bash
-# Run all tests
-pytest
+Tests are **integration tests** that run against a live CCAS instance.
 
-# Run with coverage
-pytest --cov=src --cov-report=html
+```bash
+# 1. Start the server (e.g. via docker compose up -d)
+
+# 2. Set required environment variables
+export TEST_BASE_URL=http://localhost:8000   # default; can omit if using this URL
+export TEST_ADMIN_API_KEY=ccas_your_admin_key
+export ANTHROPIC_API_KEY=sk-ant-your_key     # required for AI tests; or pass --skip-ai
+
+# 3. Run tests
+python tests/run_tests.py
 ```
+
+Useful flags: `--skip-ai` (skip tests that call the Anthropic API), `--module test_01_health` (run a single module), `--verbose`.
+
+See `tests/README.md` for details on test structure and configuration.
 
 ---
 
@@ -66,6 +76,7 @@ pytest --cov=src --cov-report=html
 | `mcp_loader.py` | MCP runtime loading, env expansion, sandbox binds, health checks |
 | `agent_manager.py` | Subagent definition CRUD, YAML frontmatter parsing, SDK-oriented loading |
 | `skill_manager.py` | Skill definition CRUD and plugin manifest management |
+| `skill_zip_handler.py` | Skill ZIP validation, extraction, path traversal protection, zip bomb defense |
 | `cleanup.py` | Background cleanup tasks |
 | `main.py` | FastAPI routes and middleware |
 | `admin_router.py` | Admin API endpoints (clients, profiles, MCP, agents, skills) |

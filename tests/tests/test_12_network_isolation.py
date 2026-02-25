@@ -395,7 +395,7 @@ class TestSandboxWrapperNetworkIsolation:
             job_id="test-job",
             input_dir="/data/jobs/test/input",
             network_isolated=True,
-            inner_script_path="/data/jobs/test/input/sandbox_inner.sh",
+            inner_script_path="/tmp/sandbox_inner.sh",
         )
         assert "sandbox_inner.sh" in script
         assert "isolated (proxy + --unshare-net)" in script

@@ -78,16 +78,25 @@ def test_create_profile_duplicate_returns_409(api, admin_headers):
     api.delete(f"/v1/admin/security-profiles/{name}", headers=admin_headers)
 
 
-def test_create_profile_invalid_name_uppercase_returns_422(api, admin_headers):
+def test_create_profile_uppercase_name_accepted(api, admin_headers):
+    name = f"UpperProfile-{random_suffix()}"
     resp = api.post("/v1/admin/security-profiles", headers=admin_headers, json={
-        "name": "BAD",
+        "name": name,
     })
-    assert resp.status_code == 422
+    assert resp.status_code == 201
+    api.delete(f"/v1/admin/security-profiles/{name}", headers=admin_headers)
 
 
 def test_create_profile_invalid_name_spaces_returns_422(api, admin_headers):
     resp = api.post("/v1/admin/security-profiles", headers=admin_headers, json={
         "name": "has space",
+    })
+    assert resp.status_code == 422
+
+
+def test_create_profile_invalid_name_special_chars_returns_422(api, admin_headers):
+    resp = api.post("/v1/admin/security-profiles", headers=admin_headers, json={
+        "name": "bad!name",
     })
     assert resp.status_code == 422
 

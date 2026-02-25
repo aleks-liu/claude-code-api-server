@@ -19,6 +19,7 @@
   - [Fail-Closed Behavior](#fail-closed-behavior)
   - [How It Works](#how-it-works)
   - [Installing bwrap](#installing-bwrap)
+  - [Running bwrap Inside Docker](#running-bwrap-inside-docker)
 - [Authentication Flow](#authentication-flow)
 - [Output File Collection](#output-file-collection)
 - [ZIP Archive Extraction](#zip-archive-extraction)
@@ -78,7 +79,7 @@ Three built-in profiles are created on first startup:
 | Profile | Tool restrictions | MCP servers | Network | Description |
 |---------|------------------|-------------|---------|-------------|
 | `unconfined` | None | All | Unrestricted (no proxy, no `--unshare-net`) | No restrictions. For trusted clients or development. |
-| `common` (default) | None | All | Any internet domain; private IPs blocked | Balanced security. Proxy filters outbound connections; private networks (10.x, 172.16.x, 192.168.x, localhost) denied. |
+| `common` (default) | None | All | Any internet domain; private/reserved IPs blocked | Balanced security. Proxy filters outbound connections; private and reserved IP ranges (RFC 1918, link-local, loopback, IPv6 equivalents) denied. |
 | `restrictive` | WebFetch, WebSearch denied | None (`[]`) | Auto-allowed domains only | Maximum security. No domains in profile's `allowed_domains` — only auto-allowed domains (`CCAS_AUTOALLOWED_DOMAINS`) reachable via proxy bypass. |
 
 Built-in profiles cannot be deleted but can be modified by admins. Custom profiles can be created for specific use cases.
@@ -120,7 +121,7 @@ The server implements role-based access control (RBAC) for API authentication:
 **Key behaviors:**
 - Admin endpoints (`/v1/admin/*`) return `403 Forbidden` for non-admin clients
 - Admins cannot delete or deactivate themselves (prevents lockout)
-- The last remaining admin cannot be deleted or demoted (prevents lockout)
+- The last remaining admin cannot be deleted, demoted, or deactivated (prevents lockout)
 - Both roles use the same API key format (`ccas_...`) and authentication flow
 
 **Admin bootstrap security:**
@@ -148,6 +149,7 @@ The process-level sandbox is the primary security control. It uses [bubblewrap (
 | `<data_dir>` | `tmpfs` | Empty (writable tmpfs) | **All other jobs hidden** (cross-job isolation) |
 | `<data_dir>/mcp/npm/node_modules` | `ro-bind` | Read-only | npm-installed MCP server packages (if present) |
 | `<data_dir>/mcp/venv` | `ro-bind` | Read-only | pip-installed MCP server packages (if present) |
+| `<data_dir>/skills-plugin` | `ro-bind` | Read-only | Skills and agents plugin directory (if skills/agents exist) |
 | `<input_dir>` | `bind` | **Read-write** | Job workspace — the only real writable directory |
 | `/dev` | `devtmpfs` | Standard | Device files |
 | `/proc` | `procfs` | Standard | Process information |
@@ -170,7 +172,7 @@ When a security profile has network restrictions (any profile other than `unconf
 
 **Filtering flow** (evaluated per outbound connection):
 
-1. Auto-allowed domains (`*.anthropic.com`, `*.claude.ai` by default) are always allowed — configurable via `CCAS_AUTOALLOWED_DOMAINS`
+1. Auto-allowed domains (configurable via `CCAS_AUTOALLOWED_DOMAINS`) are always allowed
 2. Raw IP destinations checked against `allow_ip_destination`
 3. `denied_domains` checked (overrides allowed)
 4. `allowed_domains` checked (null = any, empty = none)
@@ -226,7 +228,7 @@ Inside sandbox               Host process                    Corporate proxy
 
 Network isolation via `--unshare-net` + HTTP proxy forces all traffic through the proxy, but a process inside the sandbox could theoretically bypass the proxy by creating raw sockets directly (e.g., `socket(AF_INET, SOCK_STREAM, 0)` + `connect()`). seccomp BPF closes this gap.
 
-**How it works**: The `apply-seccomp` binary (from `@anthropic-ai/sandbox-runtime` npm package) loads a pre-compiled BPF filter via `prctl(PR_SET_SECCOMP)`, then execs the Claude CLI. The filter blocks `socket()` and related syscalls for `AF_UNIX` and `AF_INET` families. All child processes inherit the filter — it cannot be removed once applied.
+**How it works**: The `apply-seccomp` binary (from `@anthropic-ai/sandbox-runtime` npm package) loads a pre-compiled BPF filter via `prctl(PR_SET_SECCOMP)`, then execs the Claude CLI. The filter blocks `socket()` and `connect()` for `AF_UNIX` and `AF_INET` families, preventing direct network access that would bypass the proxy. All child processes inherit the filter — it cannot be removed once applied.
 
 **Execution chain** (network-isolated jobs):
 ```
@@ -268,8 +270,8 @@ SDK spawns → sandbox_wrapper.sh → exec bwrap [...] -- /real/path/to/claude "
 
 **With network isolation** (common, restrictive, or custom profiles):
 ```
-SDK spawns → sandbox_wrapper.sh → exec bwrap [--unshare-net ...] -- sandbox_inner.sh "$@"
-  sandbox_inner.sh:
+SDK spawns → sandbox_wrapper.sh → exec bwrap [--unshare-net ...] -- /tmp/sandbox_inner.sh "$@"
+  /tmp/sandbox_inner.sh (ro-bind from job_dir/sandbox_inner.sh):
     1. socat bridges proxy.sock → TCP 127.0.0.1:3128
     2. Sets HTTP_PROXY/HTTPS_PROXY
     3. exec apply-seccomp unix-block.bpf claude "$@"   (if seccomp available)
@@ -293,6 +295,45 @@ socat -V | head -1
 bwrap requires Linux kernel namespace support (user namespaces). On WSL2, this works out of the box. Some hardened kernels or container runtimes may need configuration — the server runs a smoke test at startup and reports any issues.
 
 socat is required for network isolation — it bridges the proxy Unix socket to a TCP port inside the sandbox. Without socat, network isolation cannot function (jobs will fail if their profile has network restrictions). The Docker image includes socat.
+
+### Running bwrap Inside Docker
+
+bwrap uses Linux kernel namespaces (PID, network, mount) and needs several syscalls that Docker blocks by default. Three independent security layers must be addressed:
+
+| Layer | What Docker does by default | Why bwrap needs it |
+|-------|----------------------------|-------------------|
+| **Seccomp** | Default profile blocks `clone`, `clone3`, `mount`, `umount`, `umount2`, `unshare`, `pivot_root`, `setns` | bwrap creates new PID/net/mount namespaces and bind-mounts the sandbox filesystem |
+| **AppArmor** | `docker-default` profile contains `deny mount,` | bwrap performs bind mounts, tmpfs mounts, and mounts procfs/devtmpfs |
+| **Proc masking** | Adds `MaskedPaths` and `ReadonlyPaths` to `/proc` entries | bwrap with `--unshare-pid --proc /proc` must mount a fresh procfs in the new PID namespace; masked parent `/proc` entries prevent this (`EPERM`) |
+
+**Symptom when unconfigured:** `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` — the server's startup smoke test will fail and sandbox mode will be unavailable.
+
+**Recommended configuration** (`docker-compose.yml`):
+
+```yaml
+security_opt:
+  - apparmor:unconfined                # (1) Disable AppArmor's deny mount
+  - seccomp=seccomp-bwrap.json         # (2) Custom seccomp: allow namespace/mount syscalls
+  - systempaths=unconfined             # (3) Remove /proc masking (MaskedPaths/ReadonlyPaths)
+cap_drop:
+  - NET_RAW
+  - MKNOD
+  - AUDIT_WRITE
+  - NET_BIND_SERVICE
+  - FSETID
+```
+
+**What each setting does:**
+
+1. **`apparmor:unconfined`** — disables Docker's default AppArmor profile that denies `mount()`. A custom AppArmor profile allowing only the specific mount types bwrap needs (bind, tmpfs, proc, dev) could replace this for tighter control.
+
+2. **`seccomp=seccomp-bwrap.json`** — a custom seccomp profile based on Docker's default. It unconditionally allows the 8 syscalls bwrap needs (`clone`, `clone3`, `mount`, `umount`, `umount2`, `unshare`, `pivot_root`, `setns`) while keeping all other restrictions intact — ~44 dangerous syscalls (like `kexec_load`, `reboot`, `init_module`, `keyctl`) remain blocked. See `seccomp-bwrap.json` in the project root.
+
+3. **`systempaths=unconfined`** — removes Docker's `/proc` masking (`MaskedPaths`/`ReadonlyPaths`). This is required specifically for `--unshare-pid --proc /proc` to mount a fresh procfs inside the new PID namespace. Without this, the kernel returns `EPERM` because masked entries in the parent `/proc` prevent child namespace proc mounts.
+
+4. **`cap_drop`** — drops unnecessary Linux capabilities following principle of least privilege. The container retains only: `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `KILL`, `SETGID`, `SETUID`, `SETPCAP`, `SYS_CHROOT`, `SETFCAP` (needed for gosu, bwrap, and file ownership operations).
+
+**Note:** No additional Linux capabilities are required. The custom seccomp profile allows the specific syscalls bwrap needs without elevating container privileges.
 
 ---
 
@@ -338,6 +379,13 @@ When a ZIP archive contains a single root directory (common with GitHub download
 
 - Archive: `my-project-main/src/app.py` → Extracts to: `input/src/app.py`
 - Archive: `src/app.py`, `README.md` → Extracts to: `input/src/app.py`, `input/README.md`
+
+**Archive security controls:**
+- Total uncompressed size checked against `CCAS_MAX_EXTRACTED_SIZE_MB` (pre-extraction and during extraction)
+- File count checked against `CCAS_MAX_FILES_PER_ARCHIVE`
+- Path traversal validation (rejects `..` components, absolute paths, and symlinks)
+
+See [Configuration](configuration.md) for configurable limits.
 
 ---
 

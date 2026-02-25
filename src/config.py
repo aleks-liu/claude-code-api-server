@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     # ==========================================================================
 
     default_model: str = Field(
-        default="claude-sonnet-4-5",
+        default="claude-sonnet-4-6",
         description=(
             "Default Claude model to use when the client does not specify one. "
             "Can be overridden per-job via the 'model' field in the job request."

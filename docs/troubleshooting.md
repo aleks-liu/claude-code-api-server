@@ -30,8 +30,10 @@ Fix: pip install claude-agent-sdk
 ### Job stuck in PENDING
 
 ```
-Cause: Max concurrent jobs reached
+Cause: Max concurrent jobs reached (CCAS_MAX_CONCURRENT_JOBS)
 Fix: Wait for other jobs to complete, or increase CCAS_MAX_CONCURRENT_JOBS
+Note: If the pending queue is full (CCAS_MAX_PENDING_JOBS), new submissions
+      are rejected with HTTP 429 instead of queuing
 ```
 
 ### "Sandbox creation failed (fail-closed)"
@@ -58,12 +60,13 @@ Fix: Ensure Claude Code is installed: npm install -g @anthropic-ai/claude-code
      Verify: which claude
 ```
 
-### "Access denied: file path outside allowed directory"
+### Files outside the job directory are inaccessible
 
 ```
-Cause: Claude tried to access a file outside the job's input directory
+Cause: The bwrap sandbox restricts filesystem visibility — files outside the job's
+       input directory are invisible (not just access-denied)
 Status: Working as intended (security feature)
-Note: With bwrap sandbox enabled, the file is also invisible at the filesystem level
+Note: The sandbox uses OS-level namespace isolation, not application-level path checks
 ```
 
 ### "execvp failed: No such file or directory" in job logs
@@ -117,6 +120,15 @@ Fix: Include credentials in the proxy URL: http://user:pass@proxy:3128
      Check proxy logs for more details on the authentication failure.
 ```
 
+### Zombie `<defunct>` bwrap processes accumulating
+
+```
+Cause: Container was built without tini, so orphaned bwrap grandchildren are never reaped.
+Fix: Rebuild the image — tini is included in the Dockerfile ENTRYPOINT since the fix.
+     Verify: docker exec claude-code-api ps -p 1 -o comm=  → should show "tini"
+     See: docs/architecture.md § Container Process Model (tini)
+```
+
 ### Rate limit errors from Anthropic
 
 ```
@@ -148,7 +160,7 @@ Fix: For npm packages, verify installation: ls /data/mcp/npm/node_modules/<packa
 ```
 Cause: MCP servers may have failed health check and been excluded (degraded mode),
        or the server configuration is missing.
-Fix: Check /v1/health endpoint for mcp_servers status.
+Fix: Check admin status: GET /v1/admin/status (shows MCP server health).
      List servers via admin API: GET /v1/admin/mcp
      Run health check: POST /v1/admin/mcp/health-check
 ```

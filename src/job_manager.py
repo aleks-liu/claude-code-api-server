@@ -136,29 +136,33 @@ class JobManager:
 
     async def create_job(
         self,
-        upload_id: str | None,
+        upload_ids: list[str],
         prompt: str,
         client_id: str,
         claude_md: str | None = None,
         timeout_seconds: int | None = None,
         model: str | None = None,
+        agent: str | None = None,
     ) -> JobMeta:
         """
-        Create a new job, optionally from an uploaded archive.
+        Create a new job, optionally from one or more uploaded archives.
 
         Args:
-            upload_id: ID of the uploaded archive (None for prompt-only jobs)
+            upload_ids: IDs of uploaded archives (empty list for prompt-only jobs).
+                        Archives are extracted in order; later uploads overwrite
+                        earlier ones on file-path conflicts.
             prompt: Task description for Claude
             client_id: ID of the client creating this job (used for authorization)
             claude_md: Optional CLAUDE.md content
             timeout_seconds: Job timeout (uses default if not specified)
             model: Claude model to use (None uses server default from settings)
+            agent: Name of a pre-configured agent to run this job as (None for default)
 
         Returns:
             JobMeta for the created job
 
         Raises:
-            UploadError: If upload_id is provided but not found or extraction fails
+            UploadError: If any upload is not found or extraction fails
             JobError: If job creation fails
         """
         job_id = f"job_{uuid.uuid4().hex[:12]}"
@@ -194,6 +198,20 @@ class JobManager:
                     "Try again later."
                 )
 
+            # Validate agent exists (fail-fast at creation time)
+            if agent is not None:
+                agent_file = self._settings.plugin_agents_dir / f"{agent}.md"
+                if not agent_file.is_file():
+                    raise JobError(
+                        f"Agent '{agent}' not found. "
+                        "Use the Admin API to add agents before referencing them in jobs."
+                    )
+                logger.info(
+                    "agent_mode_requested",
+                    job_id=job_id,
+                    agent=agent,
+                )
+
             # Create job directory structure
             job_dir = self._jobs_dir / job_id
             input_dir = job_dir / "input"
@@ -204,37 +222,44 @@ class JobManager:
                 input_dir.mkdir(parents=True, exist_ok=True)
                 output_dir.mkdir(parents=True, exist_ok=True)
 
-                # Extract archive if upload was provided
-                if upload_id:
+                # Extract archives if uploads were provided
+                if upload_ids:
                     upload_manager = get_upload_manager()
-                    upload_meta = upload_manager.get_upload(upload_id)
+                    total = len(upload_ids)
 
-                    if upload_meta is None:
-                        raise UploadError(
-                            f"Upload not found or expired: {upload_id}"
-                        )
+                    for idx, upload_id in enumerate(upload_ids, 1):
+                        upload_meta = upload_manager.get_upload(upload_id)
 
-                    # Verify upload ownership (BOLA prevention)
-                    if upload_meta.client_id is not None and upload_meta.client_id != client_id:
-                        logger.warning(
-                            "upload_ownership_mismatch",
+                        if upload_meta is None:
+                            raise UploadError(
+                                f"Upload not found or expired: {upload_id}"
+                                + (f" (upload {idx} of {total})" if total > 1 else "")
+                            )
+
+                        # Verify upload ownership (BOLA prevention)
+                        if upload_meta.client_id is not None and upload_meta.client_id != client_id:
+                            logger.warning(
+                                "upload_ownership_mismatch",
+                                upload_id=upload_id,
+                                upload_owner=upload_meta.client_id,
+                                requesting_client=client_id,
+                            )
+                            raise UploadOwnershipError(
+                                f"Upload {upload_id} does not belong to client {client_id}"
+                            )
+
+                        file_count = upload_manager.extract_to(upload_id, input_dir)
+                        logger.info(
+                            "files_extracted",
+                            job_id=job_id,
                             upload_id=upload_id,
-                            upload_owner=upload_meta.client_id,
-                            requesting_client=client_id,
-                        )
-                        raise UploadOwnershipError(
-                            f"Upload {upload_id} does not belong to client {client_id}"
+                            upload_index=idx,
+                            upload_total=total,
+                            file_count=file_count,
                         )
 
-                    file_count = upload_manager.extract_to(upload_id, input_dir)
-                    logger.info(
-                        "files_extracted",
-                        job_id=job_id,
-                        file_count=file_count,
-                    )
-
-                    # Delete the original archive (no longer needed)
-                    upload_manager.delete_upload(upload_id)
+                        # Delete the original archive (no longer needed)
+                        upload_manager.delete_upload(upload_id)
 
                 # Create job metadata
                 now = utcnow()
@@ -243,11 +268,12 @@ class JobManager:
                     client_id=client_id,
                     status=JobStatus.PENDING,
                     created_at=now,
-                    upload_id=upload_id,
+                    upload_ids=upload_ids,
                     prompt=prompt,
                     claude_md=claude_md,
                     timeout_seconds=timeout,
                     model=resolved_model,
+                    agent=agent,
                 )
 
                 # Save to disk and cache
@@ -259,9 +285,10 @@ class JobManager:
                     job_id=job_id,
                     client_id=client_id,
                     model=resolved_model,
+                    agent=agent,
                     timeout=timeout,
                     prompt_length=len(prompt),
-                    has_upload=upload_id is not None,
+                    upload_count=len(upload_ids),
                 )
 
                 return meta

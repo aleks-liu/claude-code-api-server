@@ -39,7 +39,7 @@ from typing import Any
 import yaml
 
 from .logging_config import get_logger
-from .models import AgentEntry, utcnow
+from .models import MAX_NAME_LENGTH, AgentEntry, utcnow
 
 logger = get_logger(__name__)
 
@@ -48,9 +48,10 @@ logger = get_logger(__name__)
 # Constants
 # =============================================================================
 
-# Agent name must start with a lowercase letter, then lowercase + digits + hyphens.
+# Agent name must start with a letter, then letters + digits + hyphens.
 # Kept strict for safe filesystem paths and Claude Code compatibility.
-_AGENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
+# Case-insensitive uniqueness is enforced at the manager level.
+_AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9-]*$")
 
 # Maximum size of a single agent definition file (500 KB).
 MAX_AGENT_FILE_SIZE = 512_000
@@ -191,14 +192,14 @@ def validate_agent_name(name: str) -> None:
     """
     if not name:
         raise AgentValidationError("Agent name cannot be empty")
-    if len(name) > 64:
+    if len(name) > MAX_NAME_LENGTH:
         raise AgentValidationError(
-            f"Agent name too long ({len(name)} chars, max 64)"
+            f"Agent name too long ({len(name)} chars, max {MAX_NAME_LENGTH})"
         )
     if not _AGENT_NAME_PATTERN.match(name):
         raise AgentValidationError(
-            f"Agent name '{name}' is invalid.  Must start with a lowercase "
-            "letter and contain only lowercase letters, digits, and hyphens."
+            f"Agent name '{name}' is invalid.  Must start with a letter "
+            "and contain only letters, digits, and hyphens."
         )
 
 
@@ -714,6 +715,15 @@ class AgentManager:
             raise AgentExistsError(
                 f"Agent '{name}' already exists."
             )
+
+        # Case-insensitive uniqueness: prevent "MyAgent" when "myagent" exists
+        name_lower = name.lower()
+        for existing in self._metadata:
+            if existing.lower() == name_lower and existing != name:
+                raise AgentExistsError(
+                    f"Agent '{name}' conflicts with existing agent "
+                    f"'{existing}' (names differ only in case)."
+                )
 
         frontmatter, _body = validate_agent_content(content, name)
 
