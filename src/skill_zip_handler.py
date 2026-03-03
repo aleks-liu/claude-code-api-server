@@ -10,7 +10,7 @@ Security layers (defense-in-depth):
   2. Pre-extraction validation (no disk writes):
      - Format check, symlink detection, path traversal, duplicates,
        size limits, file count, filename allowlist, nesting depth,
-       structure validation (SKILL.md required, allowed subdirs only)
+       structure validation (SKILL.md required)
   3. Extraction with actual-bytes tracking (zip bomb defense)
   4. Post-extraction SKILL.md content validation
 """
@@ -40,9 +40,6 @@ MAX_SKILL_NESTING_DEPTH = 5  # levels below skill root
 MAX_SKILL_INDIVIDUAL_FILE_SIZE = 5 * 1024 * 1024  # 5 MB per file
 MAX_FILENAME_LENGTH = 100  # per path component
 MAX_PATH_LENGTH = 512  # total relative path
-
-# Allowed top-level entries inside the skill root directory.
-ALLOWED_ROOT_ENTRIES = frozenset({"SKILL.md", "scripts", "references", "assets"})
 
 SKILL_FILENAME = "SKILL.md"
 
@@ -338,17 +335,10 @@ def _pre_validate_zip(
                 f"of {MAX_SKILL_NESTING_DEPTH}"
             )
 
-        # Root-level entry validation
+        # Track SKILL.md presence
         root_entry = parts[0]
-        if root_entry == SKILL_FILENAME:
-            if len(parts) == 1:
-                skill_md_found = True
-            # SKILL.md is always allowed
-        elif root_entry not in ALLOWED_ROOT_ENTRIES:
-            raise SkillZipStructureError(
-                f"Disallowed entry at skill root: '{root_entry}'. "
-                f"Allowed entries: {sorted(ALLOWED_ROOT_ENTRIES)}"
-            )
+        if root_entry == SKILL_FILENAME and len(parts) == 1:
+            skill_md_found = True
 
         # Validate each path component
         for i, component in enumerate(parts):
@@ -359,7 +349,7 @@ def _pre_validate_zip(
                     f"Invalid path in '{relative}': {error}"
                 )
 
-    # Also check directory-only entries against allowed roots
+    # Validate directory-only entries (dirname regex check)
     dir_paths = [
         _normalize_entry_path(e.filename)
         for e in info_list
@@ -370,14 +360,6 @@ def _pre_validate_zip(
         if not relative:
             continue
         parts = relative.split("/")
-        # Validate root-level directory name
-        root_entry = parts[0]
-        if root_entry not in ALLOWED_ROOT_ENTRIES:
-            raise SkillZipStructureError(
-                f"Disallowed directory at skill root: '{root_entry}'. "
-                f"Allowed entries: {sorted(ALLOWED_ROOT_ENTRIES)}"
-            )
-        # Validate each directory component name
         for component in parts:
             if component:
                 error = _validate_path_component(component, is_dir=True)

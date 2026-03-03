@@ -17,6 +17,11 @@ _NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9-]*$")
 # Server enforces max 100 chars for all entity names
 _MAX_NAME_LEN = 100
 
+# Environment-specific directories to exclude from skill archives.
+# These are never intentional skill content and would fail server-side
+# dirname validation (e.g., __pycache__ starts with underscore).
+_EXCLUDED_DIRS = frozenset({"__pycache__", "node_modules"})
+
 
 def _is_name_compatible(name: str, max_len: int = _MAX_NAME_LEN) -> bool:
     """Check if name matches CCAS naming rules."""
@@ -179,10 +184,13 @@ class LocalScanner:
 
     @staticmethod
     def _list_skill_files(skill_dir: Path) -> list[Path]:
-        """List all non-hidden files in a skill directory."""
+        """List all non-hidden, non-cache files in a skill directory."""
         files: list[Path] = []
         for path in sorted(skill_dir.rglob("*")):
-            if any(part.startswith(".") for part in path.relative_to(skill_dir).parts):
+            rel_parts = path.relative_to(skill_dir).parts
+            if any(part.startswith(".") for part in rel_parts):
+                continue
+            if any(part in _EXCLUDED_DIRS for part in rel_parts):
                 continue
             if path.is_file():
                 files.append(path)

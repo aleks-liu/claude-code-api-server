@@ -102,17 +102,15 @@ your-skill-name/
 ├── references/           # Optional — documentation
 │   ├── api-guide.md
 │   └── examples/
+├── configs/              # Optional — configuration files
+│   └── settings.json
 └── assets/               # Optional — templates, etc.
     └── report-template.md
 ```
 
-**Allowed root-level entries:**
-- `SKILL.md` (required)
-- `scripts/` (optional)
-- `references/` (optional)
-- `assets/` (optional)
-
-No other top-level files or directories are allowed.
+**Requirements:**
+- `SKILL.md` is required at the root level
+- Additional directories and files are allowed, provided names match the naming rules (alphanumeric start, then alphanumeric, underscores, hyphens)
 
 ---
 
@@ -194,7 +192,7 @@ curl -X POST http://localhost:8000/v1/admin/skills \
 **Validation rules:**
 - Skill name must start with a letter and contain only letters, digits, and hyphens
 - ZIP must contain `SKILL.md` at the skill root level
-- Only allowed subdirectories: `scripts/`, `references/`, `assets/`
+- Directory and file names must start with alphanumeric and contain only alphanumeric, underscores, hyphens (dirs) or dots (files)
 - Frontmatter must include `description`
 - Body (instructions) cannot be empty
 - Maximum ZIP size: 15 MB (compressed), 50 MB (extracted)
@@ -297,7 +295,7 @@ Skill ZIP archives undergo comprehensive security validation:
 | **Symlink rejection** | All symlink entries are rejected via external_attr check |
 | **Zip bomb protection** | Declared sizes checked pre-extraction + actual bytes tracked during extraction |
 | **Filename allowlist** | Files: `[a-zA-Z0-9][a-zA-Z0-9._-]*`, dirs: `[a-zA-Z0-9][a-zA-Z0-9_-]*` |
-| **Structure enforcement** | Only SKILL.md, scripts/, references/, assets/ at root level |
+| **Structure enforcement** | SKILL.md required at root level |
 | **Duplicate detection** | No two entries may resolve to the same path |
 | **Nesting depth** | Maximum 5 levels below skill root |
 | **Atomic deployment** | Skill directory fully written before becoming visible; rollback on failure |

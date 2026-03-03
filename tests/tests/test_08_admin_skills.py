@@ -152,15 +152,6 @@ def test_add_skill_empty_body_returns_422(api, admin_headers):
     assert resp.status_code == 422
 
 
-def test_add_skill_disallowed_dir_returns_400(api, admin_headers):
-    """ZIP with a directory not in the allowed set."""
-    name = _skill_name()
-    zip_bytes = make_skill_zip(name, extra_files={
-        "forbidden/evil.py": "import os; os.system('rm -rf /')",
-    })
-    resp = _upload_skill(api, admin_headers, name, zip_bytes)
-    assert resp.status_code == 400
-
 
 def test_add_skill_path_traversal_returns_400(api, admin_headers):
     """ZIP with path traversal attempt."""

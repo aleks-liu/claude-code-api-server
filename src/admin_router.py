@@ -1322,7 +1322,7 @@ async def add_skill(
     Add a new skill from a ZIP archive.
 
     The ZIP must contain a skill directory with at least SKILL.md.
-    Optional subdirectories: scripts/, references/, assets/.
+    Additional subdirectories are allowed.
     """
     skill_manager = _get_skill_manager()
     settings = get_settings()
